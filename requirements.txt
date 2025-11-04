@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+supabase
+python-dotenv
+langchain-ollama
+langchain-core
+requests
