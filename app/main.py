@@ -18,9 +18,29 @@ app = FastAPI(
 # Initialize Supabase client
 supabase: Client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
 
-# Initialize the LLM model (Ollama for local dev)
-# Make sure you have pulled the model: `ollama pull gemma3`
-model = ChatOllama(model=settings.LLM_MODEL, keep_alive="1h")
+# Initialize the LLM model based on provider (Ollama for local, OpenAI for production)
+def get_llm_model():
+    """Get LLM model based on environment configuration"""
+    if settings.LLM_PROVIDER.lower() == "openai":
+        from langchain_openai import ChatOpenAI
+        if not settings.OPENAI_API_KEY:
+            raise ValueError("OPENAI_API_KEY is required when LLM_PROVIDER is 'openai'")
+        return ChatOpenAI(
+            model=settings.LLM_MODEL if settings.LLM_MODEL != "gemma3" else "gpt-3.5-turbo",
+            api_key=settings.OPENAI_API_KEY,
+            temperature=0.7
+        )
+    else:
+        # Default to Ollama for local development
+        return ChatOllama(model=settings.LLM_MODEL, keep_alive="1h")
+
+try:
+    model = get_llm_model()
+    llm_available = True
+except Exception as e:
+    print(f"Warning: LLM initialization failed: {e}")
+    model = None
+    llm_available = False
 
 # Create the prompt template for conversational event descriptions
 event_prompt = ChatPromptTemplate.from_messages([
@@ -101,7 +121,14 @@ def read_root():
         "status": "active",
         "version": "0.1.0 (MVP)",
         "description": "AI-Powered Event Discovery for Bangalore",
-        "note": "Connected to Supabase with LLM-powered conversational responses"
+        "environment": {
+            "is_vercel": settings.IS_VERCEL,
+            "is_production": settings.IS_PRODUCTION,
+            "llm_provider": settings.LLM_PROVIDER,
+            "llm_model": settings.LLM_MODEL,
+            "llm_available": llm_available
+        },
+        "note": "Connected to Supabase with LLM-powered conversational responses" if llm_available else "Connected to Supabase (LLM unavailable)"
     }
 
 @app.get("/api/random-event")
@@ -126,24 +153,35 @@ def get_random_event():
         # Pick a random event
         event = random.choice(response.data)
         
-        # Create the chain
-        chain = event_prompt | model
-        
-        # Generate conversational description
-        llm_response = chain.invoke({
-            "name": event.get("name", "Unknown Event"),
-            "category": event.get("category", "event"),
-            "description": event.get("description", "An exciting event"),
-            "location": event.get("location", "Bangalore"),
-            "date": event.get("date", "Soon"),
-            "time": event.get("time", "TBA"),
-            "price": event.get("price", "Contact organizer")
-        })
+        # Generate conversational description if LLM is available
+        if llm_available and model:
+            try:
+                # Create the chain
+                chain = event_prompt | model
+                
+                # Generate conversational description
+                llm_response = chain.invoke({
+                    "name": event.get("name", "Unknown Event"),
+                    "category": event.get("category", "event"),
+                    "description": event.get("description", "An exciting event"),
+                    "location": event.get("location", "Bangalore"),
+                    "date": event.get("date", "Soon"),
+                    "time": event.get("time", "TBA"),
+                    "price": event.get("price", "Contact organizer")
+                })
+                suggestion = llm_response.content
+            except Exception as llm_error:
+                # Fallback if LLM fails
+                print(f"LLM generation failed: {llm_error}")
+                suggestion = f"Check out {event.get('name', 'this event')} at {event.get('location', 'Bangalore')}! {event.get('description', 'An exciting event.')} It's on {event.get('date', 'soon')} at {event.get('time', 'TBA')}."
+        else:
+            # Fallback when LLM is not available
+            suggestion = f"Check out {event.get('name', 'this event')} at {event.get('location', 'Bangalore')}! {event.get('description', 'An exciting event.')} It's on {event.get('date', 'soon')} at {event.get('time', 'TBA')}."
         
         # Return the conversational response along with event data
         return JSONResponse(content={
             "success": True,
-            "suggestion": llm_response.content,
+            "suggestion": suggestion,
             "event_details": {
                 "id": event.get("id"),
                 "name": event.get("name"),
@@ -155,7 +193,8 @@ def get_random_event():
                 "image_url": event.get("image_url"),
                 "booking_link": event.get("booking_link")
             },
-            "source": "Supabase"
+            "source": "Supabase",
+            "ai_generated": llm_available
         })
             
     except Exception as e:

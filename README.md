@@ -191,7 +191,60 @@ curl -X POST http://127.0.0.1:8000/api/events/by-preferences \
 
 Interactive API documentation is available at:
 - **Swagger UI**: `http://127.0.0.1:8000/docs`
-- **ReDoc**: `http://127.0.0.1:8000/redoc` 
+- **ReDoc**: `http://127.0.0.1:8000/redoc`
+
+## Deployment to Vercel
+
+### Quick Deploy
+
+The API is ready to deploy to Vercel! Follow these steps:
+
+#### 1. Set Required Environment Variables in Vercel
+
+Go to Vercel Dashboard → Settings → Environment Variables and add:
+
+```bash
+SUPABASE_URL=https://wopjezlgtborpnhcfvoc.supabase.co
+SUPABASE_KEY=your-supabase-key
+OPENAI_API_KEY=your-openai-api-key  # ⚠️ REQUIRED for Vercel
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-3.5-turbo
+```
+
+**Important**: You MUST add `OPENAI_API_KEY` to deploy on Vercel. Get one from [platform.openai.com](https://platform.openai.com).
+
+#### 2. Deploy
+
+**Option A: GitHub Integration**
+1. Push code to GitHub
+2. Import repository in Vercel
+3. Vercel auto-deploys
+
+**Option B: Vercel CLI**
+```bash
+vercel --prod
+```
+
+#### 3. Verify Deployment
+
+```bash
+curl https://your-project.vercel.app/
+```
+
+Check that `"llm_available": true` in the response.
+
+### Environment Differences
+
+| Environment | LLM Provider | Model | Cost |
+|-------------|-------------|-------|------|
+| **Local** | Ollama | gemma3 | Free |
+| **Vercel** | OpenAI | gpt-3.5-turbo | ~$0.0001/request |
+
+The API automatically switches based on environment!
+
+### Full Documentation
+
+See `VERCEL_DEPLOYMENT.md` and `DEPLOYMENT_CHECKLIST.md` for complete deployment instructions.
 
 ## License
 
