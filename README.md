@@ -22,6 +22,7 @@ Spotive is a conversational AI agent that talks to users over phone calls, under
 ### What Spotive Does
 
 Spotive helps users discover dynamic events and experiences including:
+
 - 🎭 Entertainment venues and shows
 - 🎵 Concerts and music events
 - ⚽ Sports events
