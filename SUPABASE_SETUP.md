@@ -23,7 +23,9 @@ Create a table named `events` with the following columns:
 | `booking_link` | `text` | URL to booking page | No |
 | `created_at` | `timestamp` | Auto-generated timestamp | No |
 
-## SQL to Create Table
+## SQL to Create Tables
+
+### 1. Events Table
 
 ```sql
 CREATE TABLE events (
@@ -42,6 +44,38 @@ CREATE TABLE events (
 
 -- Add index for category queries
 CREATE INDEX idx_events_category ON events(category);
+```
+
+### 2. API Logs Table (For Analytics)
+
+```sql
+CREATE TABLE api_logs (
+  id bigserial PRIMARY KEY,
+  timestamp timestamp with time zone NOT NULL DEFAULT timezone('utc'::text, now()),
+  endpoint text NOT NULL,
+  interests text,
+  mapped_categories jsonb,
+  total_matching_events integer,
+  selected_event_id bigint,
+  selected_event_name text,
+  selected_event_category text,
+  success boolean NOT NULL,
+  error_message text,
+  response_time_ms numeric,
+  client_ip text,
+  user_agent text,
+  created_at timestamp with time zone DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- Add indexes for faster analytics queries
+CREATE INDEX idx_api_logs_timestamp ON api_logs(timestamp DESC);
+CREATE INDEX idx_api_logs_endpoint ON api_logs(endpoint);
+CREATE INDEX idx_api_logs_success ON api_logs(success);
+CREATE INDEX idx_api_logs_interests ON api_logs(interests);
+CREATE INDEX idx_api_logs_selected_event_id ON api_logs(selected_event_id);
+
+-- Add comment
+COMMENT ON TABLE api_logs IS 'Stores detailed logs of API calls for data analysis and debugging';
 ```
 
 ## Sample Data

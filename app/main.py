@@ -235,7 +235,7 @@ def get_event_by_interests(request: InterestsRequest, background_tasks: Backgrou
     start_time = datetime.now()
     try:
         # Predefined categories
-        valid_categories = ["concert", "sports", "outdoor", "food", "spiritual", "cultural", "kids", "entertainment"]
+        valid_categories = ["concert", "sports", "outdoor", "food", "spiritual", "cultural", "kids", "comedy"]
         
         # Step 1: Use LLM to map interests to categories
         if llm_available and model:
@@ -646,7 +646,7 @@ def generate_logs_html():
         </div>
         
         <script>
-            setTimeout(function() { location.reload(); }, 5000);
+            // Auto-refresh removed as per user request
         </script>
     </body>
     </html>
@@ -697,22 +697,25 @@ def view_analytics_dashboard(
     now = datetime.now()
     if time_filter == "hour":
         cutoff = now - timedelta(hours=1)
-        filtered_logs = [log for log in filtered_logs if datetime.fromisoformat(log["timestamp"]) > cutoff]
+        filtered_logs = [log for log in filtered_logs if log.get("timestamp") and datetime.fromisoformat(log["timestamp"]) > cutoff]
     elif time_filter == "day":
         cutoff = now - timedelta(days=1)
-        filtered_logs = [log for log in filtered_logs if datetime.fromisoformat(log["timestamp"]) > cutoff]
+        filtered_logs = [log for log in filtered_logs if log.get("timestamp") and datetime.fromisoformat(log["timestamp"]) > cutoff]
     elif time_filter == "week":
         cutoff = now - timedelta(weeks=1)
-        filtered_logs = [log for log in filtered_logs if datetime.fromisoformat(log["timestamp"]) > cutoff]
+        filtered_logs = [log for log in filtered_logs if log.get("timestamp") and datetime.fromisoformat(log["timestamp"]) > cutoff]
     elif time_filter == "custom" and start_date and end_date:
-        start = datetime.fromisoformat(start_date)
-        end = datetime.fromisoformat(end_date)
-        filtered_logs = [log for log in filtered_logs 
-                        if start <= datetime.fromisoformat(log["timestamp"]) <= end]
+        try:
+            start = datetime.fromisoformat(start_date)
+            end = datetime.fromisoformat(end_date)
+            filtered_logs = [log for log in filtered_logs 
+                            if log.get("timestamp") and start <= datetime.fromisoformat(log["timestamp"]) <= end]
+        except:
+            pass  # If date parsing fails, show all logs
     
     # Endpoint filtering
     if endpoint != "all":
-        filtered_logs = [log for log in filtered_logs if log["path"] == endpoint]
+        filtered_logs = [log for log in filtered_logs if log.get("path") == endpoint]
     
     # Status filtering
     if status == "success":
@@ -721,12 +724,15 @@ def view_analytics_dashboard(
         filtered_logs = [log for log in filtered_logs if not log.get("success", True)]
     
     # Sorting
-    if sort_by == "timestamp":
-        filtered_logs.sort(key=lambda x: x["timestamp"], reverse=(order == "desc"))
-    elif sort_by == "duration":
-        filtered_logs.sort(key=lambda x: x.get("duration_ms", 0), reverse=(order == "desc"))
-    elif sort_by == "status":
-        filtered_logs.sort(key=lambda x: x.get("success", False), reverse=(order == "desc"))
+    try:
+        if sort_by == "timestamp":
+            filtered_logs.sort(key=lambda x: x.get("timestamp", ""), reverse=(order == "desc"))
+        elif sort_by == "duration":
+            filtered_logs.sort(key=lambda x: x.get("duration_ms", 0), reverse=(order == "desc"))
+        elif sort_by == "status":
+            filtered_logs.sort(key=lambda x: x.get("success", False), reverse=(order == "desc"))
+    except:
+        pass  # If sorting fails, return unsorted
     
     # Calculate advanced analytics
     total_filtered = len(filtered_logs)
@@ -734,15 +740,20 @@ def view_analytics_dashboard(
     failed = total_filtered - successful
     success_rate = round((successful / total_filtered * 100) if total_filtered > 0 else 0, 2)
     
-    durations = [log.get("duration_ms", 0) for log in filtered_logs if log.get("duration_ms")]
-    avg_duration = round(sum(durations) / len(durations) if durations else 0, 2)
-    min_duration = round(min(durations) if durations else 0, 2)
-    max_duration = round(max(durations) if durations else 0, 2)
-    median_duration = round(sorted(durations)[len(durations)//2] if durations else 0, 2)
+    durations = [log.get("duration_ms", 0) for log in filtered_logs if log.get("duration_ms") is not None]
+    avg_duration = round(sum(durations) / len(durations), 2) if durations else 0
+    min_duration = round(min(durations), 2) if durations else 0
+    max_duration = round(max(durations), 2) if durations else 0
+    median_duration = round(sorted(durations)[len(durations)//2], 2) if durations else 0
     
     # Percentiles
-    p95_duration = round(sorted(durations)[int(len(durations)*0.95)] if durations else 0, 2)
-    p99_duration = round(sorted(durations)[int(len(durations)*0.99)] if durations else 0, 2)
+    if durations and len(durations) > 1:
+        sorted_durations = sorted(durations)
+        p95_duration = round(sorted_durations[int(len(sorted_durations)*0.95)], 2)
+        p99_duration = round(sorted_durations[int(len(sorted_durations)*0.99)], 2)
+    else:
+        p95_duration = 0
+        p99_duration = 0
     
     # Endpoint distribution
     endpoint_counts = {}
@@ -772,9 +783,13 @@ def view_analytics_dashboard(
     # Time series data (requests per minute)
     time_series = {}
     for log in filtered_logs:
-        timestamp = datetime.fromisoformat(log["timestamp"])
-        minute_key = timestamp.strftime("%Y-%m-%d %H:%M")
-        time_series[minute_key] = time_series.get(minute_key, 0) + 1
+        if log.get("timestamp"):
+            try:
+                timestamp = datetime.fromisoformat(log["timestamp"])
+                minute_key = timestamp.strftime("%Y-%m-%d %H:%M")
+                time_series[minute_key] = time_series.get(minute_key, 0) + 1
+            except:
+                pass
     
     # Generate HTML
     return HTMLResponse(content=generate_analytics_html(
@@ -795,7 +810,7 @@ def generate_analytics_html(
     
     # Generate endpoint options
     endpoint_options = ""
-    unique_endpoints = set(log["path"] for log in audit_logs)
+    unique_endpoints = set(log.get("path", "") for log in audit_logs if log.get("path"))
     for ep in sorted(unique_endpoints):
         selected = "selected" if ep == endpoint_filter else ""
         endpoint_options += f'<option value="{ep}" {selected}>{ep}</option>'
@@ -1031,6 +1046,8 @@ def generate_analytics_html(
             function exportToCSV() {{
                 window.location.href = '/api/logs/export?time_filter={time_filter}&endpoint={endpoint_filter}&status={status_filter}';
             }}
+            
+            // Removed auto-refresh as per user request
         </script>
     </body>
     </html>
@@ -1056,16 +1073,16 @@ def export_logs_csv(
     now = datetime.now()
     if time_filter == "hour":
         cutoff = now - timedelta(hours=1)
-        filtered_logs = [log for log in filtered_logs if datetime.fromisoformat(log["timestamp"]) > cutoff]
+        filtered_logs = [log for log in filtered_logs if log.get("timestamp") and datetime.fromisoformat(log["timestamp"]) > cutoff]
     elif time_filter == "day":
         cutoff = now - timedelta(days=1)
-        filtered_logs = [log for log in filtered_logs if datetime.fromisoformat(log["timestamp"]) > cutoff]
+        filtered_logs = [log for log in filtered_logs if log.get("timestamp") and datetime.fromisoformat(log["timestamp"]) > cutoff]
     elif time_filter == "week":
         cutoff = now - timedelta(weeks=1)
-        filtered_logs = [log for log in filtered_logs if datetime.fromisoformat(log["timestamp"]) > cutoff]
+        filtered_logs = [log for log in filtered_logs if log.get("timestamp") and datetime.fromisoformat(log["timestamp"]) > cutoff]
     
     if endpoint != "all":
-        filtered_logs = [log for log in filtered_logs if log["path"] == endpoint]
+        filtered_logs = [log for log in filtered_logs if log.get("path") == endpoint]
     
     if status == "success":
         filtered_logs = [log for log in filtered_logs if log.get("success", False)]
