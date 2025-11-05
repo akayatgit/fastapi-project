@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.responses import JSONResponse, HTMLResponse
 from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
@@ -8,6 +8,7 @@ import random
 import json
 from datetime import datetime
 from typing import List, Dict, Any
+import asyncio
 from app.core.config import settings
 
 app = FastAPI(
@@ -22,6 +23,28 @@ MAX_LOGS = 1000  # Keep last 1000 logs
 
 # Initialize Supabase client
 supabase: Client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
+
+# Background task to log API calls to Supabase
+def log_to_supabase(log_data: Dict[str, Any]):
+    """Log API call details to Supabase for analytics (runs in background)"""
+    try:
+        supabase.table('api_logs').insert({
+            "timestamp": log_data.get("timestamp"),
+            "endpoint": log_data.get("endpoint"),
+            "interests": log_data.get("interests"),
+            "mapped_categories": log_data.get("mapped_categories"),
+            "total_matching_events": log_data.get("total_matching_events"),
+            "selected_event_id": log_data.get("selected_event_id"),
+            "selected_event_name": log_data.get("selected_event_name"),
+            "selected_event_category": log_data.get("selected_event_category"),
+            "success": log_data.get("success"),
+            "error_message": log_data.get("error_message"),
+            "response_time_ms": log_data.get("response_time_ms"),
+            "client_ip": log_data.get("client_ip"),
+            "user_agent": log_data.get("user_agent")
+        }).execute()
+    except Exception as e:
+        print(f"Failed to log to Supabase: {e}")
 
 # Initialize the LLM model based on provider (Ollama for local, OpenAI for production)
 def get_llm_model():
@@ -197,7 +220,7 @@ def read_root():
     }
 
 @app.post("/api/event/by-interests")
-def get_event_by_interests(request: InterestsRequest):
+def get_event_by_interests(request: InterestsRequest, background_tasks: BackgroundTasks, req: Request):
     """
     Get events based on user interests. The LLM maps interests to categories and queries matching events.
     
@@ -209,6 +232,7 @@ def get_event_by_interests(request: InterestsRequest):
     2. Query events matching those categories
     3. Return a random event with conversational description
     """
+    start_time = datetime.now()
     try:
         # Predefined categories
         valid_categories = ["concert", "sports", "outdoor", "food", "spiritual", "cultural", "kids", "entertainment"]
@@ -250,6 +274,23 @@ def get_event_by_interests(request: InterestsRequest):
                 events.extend(response.data)
         
         if not events or len(events) == 0:
+            # Log to Supabase (async)
+            response_time = (datetime.now() - start_time).total_seconds() * 1000
+            background_tasks.add_task(log_to_supabase, {
+                "timestamp": datetime.now().isoformat(),
+                "endpoint": "/api/event/by-interests",
+                "interests": request.interests,
+                "mapped_categories": json.dumps(categories),
+                "total_matching_events": 0,
+                "selected_event_id": None,
+                "selected_event_name": None,
+                "selected_event_category": None,
+                "success": False,
+                "error_message": f"No events found matching interests: {request.interests}",
+                "response_time_ms": response_time,
+                "client_ip": req.client.host if req.client else "unknown",
+                "user_agent": req.headers.get("user-agent", "unknown")
+            })
             return JSONResponse(
                 status_code=404,
                 content={
@@ -283,6 +324,24 @@ def get_event_by_interests(request: InterestsRequest):
         else:
             suggestion = f"Check out {event.get('name', 'this event')} at {event.get('location', 'Bangalore')}! {event.get('description', 'An exciting event.')} It's on {event.get('date', 'soon')} at {event.get('time', 'TBA')}."
         
+        # Log to Supabase (async) - SUCCESS CASE
+        response_time = (datetime.now() - start_time).total_seconds() * 1000
+        background_tasks.add_task(log_to_supabase, {
+            "timestamp": datetime.now().isoformat(),
+            "endpoint": "/api/event/by-interests",
+            "interests": request.interests,
+            "mapped_categories": json.dumps(categories),
+            "total_matching_events": len(events),
+            "selected_event_id": event.get("id"),
+            "selected_event_name": event.get("name"),
+            "selected_event_category": event.get("category"),
+            "success": True,
+            "error_message": None,
+            "response_time_ms": response_time,
+            "client_ip": req.client.host if req.client else "unknown",
+            "user_agent": req.headers.get("user-agent", "unknown")
+        })
+        
         # Return the conversational response
         return JSONResponse(content={
             "success": True,
@@ -306,6 +365,23 @@ def get_event_by_interests(request: InterestsRequest):
         })
             
     except Exception as e:
+        # Log to Supabase (async) - ERROR CASE
+        response_time = (datetime.now() - start_time).total_seconds() * 1000
+        background_tasks.add_task(log_to_supabase, {
+            "timestamp": datetime.now().isoformat(),
+            "endpoint": "/api/event/by-interests",
+            "interests": request.interests,
+            "mapped_categories": None,
+            "total_matching_events": 0,
+            "selected_event_id": None,
+            "selected_event_name": None,
+            "selected_event_category": None,
+            "success": False,
+            "error_message": str(e),
+            "response_time_ms": response_time,
+            "client_ip": req.client.host if req.client else "unknown",
+            "user_agent": req.headers.get("user-agent", "unknown")
+        })
         return JSONResponse(
             status_code=500,
             content={
@@ -320,6 +396,11 @@ def view_audit_logs():
     """
     View all audit logs in a nice HTML format for debugging
     """
+    # Return simple HTML without complex CSS that causes f-string issues
+    return HTMLResponse(content=generate_logs_html())
+
+def generate_logs_html():
+    """Generate HTML for logs page (separate function to avoid f-string CSS issues)"""
     # Calculate statistics first
     total_logs = len(audit_logs)
     successful_logs = sum(1 for log in audit_logs if log.get("success", False))
@@ -394,8 +475,7 @@ def view_audit_logs():
     else:
         log_entries_html = "<p style='text-align: center; color: #999; font-size: 1.2em; padding: 40px;'>📭 No logs yet. Make some API calls to see them here!</p>"
     
-    html_content = f"""
-    <!DOCTYPE html>
+    html_content = """<!DOCTYPE html>
     <html>
     <head>
         <title>Spotive API - Audit Logs</title>
@@ -545,35 +625,34 @@ def view_audit_logs():
         <div class="stats">
             <div class="stat-card">
                 <div>Total Requests</div>
-                <div class="stat-value">{total_logs}</div>
+                <div class="stat-value">""" + str(total_logs) + """</div>
             </div>
             <div class="stat-card">
                 <div>Success Rate</div>
-                <div class="stat-value">{success_rate}%</div>
+                <div class="stat-value">""" + str(success_rate) + """%</div>
             </div>
             <div class="stat-card">
                 <div>Failed Requests</div>
-                <div class="stat-value">{failed_logs}</div>
+                <div class="stat-value">""" + str(failed_logs) + """</div>
             </div>
             <div class="stat-card">
                 <div>Avg Response Time</div>
-                <div class="stat-value">{avg_duration}ms</div>
+                <div class="stat-value">""" + str(avg_duration) + """ms</div>
             </div>
         </div>
         
         <div class="logs-container">
-            {log_entries_html}
+            """ + log_entries_html + """
         </div>
         
         <script>
-            // Auto-refresh every 5 seconds
-            setTimeout(function() {{ location.reload(); }}, 5000);
+            setTimeout(function() { location.reload(); }, 5000);
         </script>
     </body>
     </html>
     """
     
-    return HTMLResponse(content=html_content)
+    return html_content
 
 @app.get("/api/logs/json")
 def get_audit_logs_json():
