@@ -55,6 +55,7 @@ CREATE TABLE api_logs (
   endpoint text NOT NULL,
   interests text,
   mapped_categories jsonb,
+  mapping_method text,  -- 'llm', 'keyword_fallback', or 'error' - tracks which method mapped interests to categories
   total_matching_events integer,
   selected_event_id bigint,
   selected_event_name text,
@@ -73,9 +74,13 @@ CREATE INDEX idx_api_logs_endpoint ON api_logs(endpoint);
 CREATE INDEX idx_api_logs_success ON api_logs(success);
 CREATE INDEX idx_api_logs_interests ON api_logs(interests);
 CREATE INDEX idx_api_logs_selected_event_id ON api_logs(selected_event_id);
+CREATE INDEX idx_api_logs_mapping_method ON api_logs(mapping_method);  -- NEW: Track LLM vs fallback usage
 
 -- Add comment
 COMMENT ON TABLE api_logs IS 'Stores detailed logs of API calls for data analysis and debugging';
+
+-- If table already exists, add the new column with:
+-- ALTER TABLE api_logs ADD COLUMN IF NOT EXISTS mapping_method text;
 ```
 
 ## Sample Data

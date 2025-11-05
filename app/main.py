@@ -33,6 +33,7 @@ def log_to_supabase(log_data: Dict[str, Any]):
             "endpoint": log_data.get("endpoint"),
             "interests": log_data.get("interests"),
             "mapped_categories": log_data.get("mapped_categories"),
+            "mapping_method": log_data.get("mapping_method"),  # "llm" or "keyword_fallback"
             "total_matching_events": log_data.get("total_matching_events"),
             "selected_event_id": log_data.get("selected_event_id"),
             "selected_event_name": log_data.get("selected_event_name"),
@@ -100,32 +101,43 @@ category_mapping_prompt = ChatPromptTemplate.from_messages([
 
 Your job is to map user interests to our predefined event categories.
 
-**Predefined Categories (ONLY use these):**
-- concert (music events, live performances, DJ nights, music festivals)
-- sports (marathons, cricket, football, fitness events, yoga)
-- outdoor (trekking, hiking, nature activities, adventure sports)
-- food (food festivals, buffet events, culinary experiences)
-- spiritual (religious events, meditation, temple visits, spiritual gatherings)
-- cultural (art exhibitions, theater, dance performances, traditional events)
-- kids (children activities, family events, kids workshops)
-- entertainment (comedy shows, standup, movies, fun activities)
+**Predefined Categories (ONLY use these exactly):**
+- concert (music events, live performances, DJ nights, music festivals, bands, singing)
+- sports (marathons, cricket, football, fitness events, gym, exercise, running)
+- outdoor (trekking, hiking, nature activities, adventure sports, camping, cycling)
+- food (food festivals, buffet events, culinary experiences, dining, gastronomy)
+- spiritual (religious events, meditation, temple visits, spiritual gatherings, devotional)
+- cultural (art exhibitions, theater, dance performances, traditional events, heritage, museums)
+- kids (children activities, family events, kids workshops, family-friendly)
+- entertainment (general entertainment, movies, games, leisure, shows)
+- comedy (standup comedy, comedy shows, humor, laughter)
 
-**Instructions:**
-1. Analyze the user's interests
-2. Map them to the most relevant categories from the list above
-3. Return ONLY a JSON array of matching categories
-4. Format: ["category1", "category2", ...]
-5. Include multiple categories if interests span different areas
-6. If uncertain, include related categories
+**CRITICAL RULES:**
+1. Return ONLY categories that ACTUALLY match the user's interests
+2. Do NOT return all categories - be selective!
+3. Maximum 3 categories per response
+4. If only one category matches, return only that one
+5. Return ONLY a JSON array of category names
+6. Use EXACT category names from the list above
 
-**Examples:**
-- "music, dancing" → ["concert", "entertainment"]
-- "family fun" → ["kids", "entertainment"]
-- "adventure, nature" → ["outdoor", "sports"]
+**Examples (Follow these patterns - BE SELECTIVE!):**
+- "comedy" → ["comedy"]
+- "standup" → ["comedy"]
+- "music" → ["concert"]
+- "trekking" → ["outdoor"]
+- "food" → ["food"]
+- "meditation" → ["spiritual"]
+- "kids" → ["kids"]
+- "music, dancing" → ["concert"]
+- "family fun" → ["kids"]
+- "adventure, nature" → ["outdoor"]
 - "food, traditional" → ["food", "cultural"]
-- "fitness, wellness" → ["sports", "spiritual"]
+- "fitness, gym" → ["sports"]
+- "comedy, music" → ["comedy", "concert"]
+
+**DO NOT return all 8 categories - only return what matches!**
 """),
-    ("human", "User interests: {interests}\n\nReturn ONLY the JSON array of matching categories:")
+    ("human", "User interests: {interests}\n\nReturn ONLY the JSON array of matching categories (max 3):")
 ])
 
 # Pydantic model for interests request body
@@ -138,6 +150,40 @@ class InterestsRequest(BaseModel):
                 "interests": "music, outdoor, adventure"
             }
         }
+
+# Keyword-based category matching as fallback
+def keyword_match_categories(interests: str, valid_categories: list) -> list:
+    """
+    Fallback keyword matching when LLM fails
+    Maps interests to categories using keyword matching
+    """
+    interests_lower = interests.lower()
+    matched = []
+    
+    # Keyword mappings - must align with database categories
+    keyword_map = {
+        "concert": ["music", "concert", "band", "dj", "singing", "song", "live music", "performance", "festival"],
+        "sports": ["sport", "fitness", "exercise", "gym", "marathon", "running", "cricket", "football", "game", "athletic"],
+        "outdoor": ["outdoor", "trek", "hike", "nature", "adventure", "camping", "cycling", "mountain", "trail"],
+        "food": ["food", "buffet", "culinary", "dining", "cuisine", "feast", "gastronomy", "eat"],
+        "spiritual": ["spiritual", "meditation", "temple", "religious", "prayer", "worship", "devotion", "peace", "mandir"],
+        "cultural": ["cultural", "art", "theater", "theatre", "dance", "traditional", "heritage", "museum", "exhibition", "classical"],
+        "kids": ["kid", "child", "children", "family", "family-friendly"],
+        "entertainment": ["entertainment", "show", "movie", "film", "leisure", "general fun"],
+        "comedy": ["comedy", "standup", "stand-up", "humor", "laugh", "comic", "comedian", "funny"],
+    }
+    
+    # Check each category
+    for category, keywords in keyword_map.items():
+        if category in valid_categories:
+            for keyword in keywords:
+                if keyword in interests_lower:
+                    if category not in matched:
+                        matched.append(category)
+                    break
+    
+    # If no matches found, return empty (will trigger error message)
+    return matched[:3]  # Max 3 categories
 
 # Middleware to log all API calls
 @app.middleware("http")
@@ -234,10 +280,13 @@ def get_event_by_interests(request: InterestsRequest, background_tasks: Backgrou
     """
     start_time = datetime.now()
     try:
-        # Predefined categories
-        valid_categories = ["concert", "sports", "outdoor", "food", "spiritual", "cultural", "kids", "comedy"]
+        # Predefined categories (must match database exactly)
+        # Note: Database has both "entertainment" and "comedy" as separate categories
+        valid_categories = ["concert", "sports", "outdoor", "food", "spiritual", "cultural", "kids", "entertainment", "comedy"]
         
         # Step 1: Use LLM to map interests to categories
+        categories = []
+        
         if llm_available and model:
             try:
                 mapping_chain = category_mapping_prompt | model
@@ -245,25 +294,46 @@ def get_event_by_interests(request: InterestsRequest, background_tasks: Backgrou
                 
                 # Parse the LLM response to get categories
                 try:
-                    categories = json.loads(mapping_response.content.strip())
+                    llm_raw_response = mapping_response.content.strip()
+                    print(f"DEBUG - LLM raw response for '{request.interests}': {llm_raw_response}")
+                    
+                    categories = json.loads(llm_raw_response)
+                    print(f"DEBUG - Parsed categories: {categories}")
+                    
                     if not isinstance(categories, list):
-                        # Fallback: use all categories
-                        categories = valid_categories
+                        print(f"DEBUG - LLM returned non-list, using fallback")
+                        categories = []
                     else:
                         # Filter to only valid categories
+                        original_count = len(categories)
                         categories = [cat.lower() for cat in categories if cat.lower() in valid_categories]
-                        if not categories:
-                            categories = valid_categories
-                except json.JSONDecodeError:
-                    # If parsing fails, use all categories
-                    categories = valid_categories
+                        print(f"DEBUG - After validation: {categories} (filtered from {original_count})")
+                except json.JSONDecodeError as e:
+                    print(f"DEBUG - JSON decode error: {e}, using fallback")
+                    categories = []
             except Exception as e:
                 print(f"Category mapping failed: {e}")
-                # Fallback: use all categories
-                categories = valid_categories
-        else:
-            # If LLM not available, use all categories
-            categories = valid_categories
+                categories = []
+        
+        # Validation: If LLM returned too many categories (>4) or none, use keyword fallback
+        mapping_method = "llm"
+        if len(categories) == 0 or len(categories) > 4:
+            print(f"DEBUG - LLM returned invalid categories ({len(categories)}), using keyword matching fallback")
+            categories = keyword_match_categories(request.interests, valid_categories)
+            mapping_method = "keyword_fallback"
+            print(f"DEBUG - Keyword matching result: {categories}")
+        
+        # Final validation: If still no categories, return error
+        if not categories:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "message": f"Could not map interests '{request.interests}' to any event categories. Please try different interests.",
+                    "valid_categories": valid_categories,
+                    "hint": "Try: music, comedy, sports, outdoor, food, spiritual, cultural, kids"
+                }
+            )
         
         # Step 2: Query Supabase for events matching any of the categories
         # Build OR query for multiple categories
@@ -281,6 +351,7 @@ def get_event_by_interests(request: InterestsRequest, background_tasks: Backgrou
                 "endpoint": "/api/event/by-interests",
                 "interests": request.interests,
                 "mapped_categories": json.dumps(categories),
+                "mapping_method": mapping_method,
                 "total_matching_events": 0,
                 "selected_event_id": None,
                 "selected_event_name": None,
@@ -331,6 +402,7 @@ def get_event_by_interests(request: InterestsRequest, background_tasks: Backgrou
             "endpoint": "/api/event/by-interests",
             "interests": request.interests,
             "mapped_categories": json.dumps(categories),
+            "mapping_method": mapping_method,  # Track which method was used
             "total_matching_events": len(events),
             "selected_event_id": event.get("id"),
             "selected_event_name": event.get("name"),
@@ -347,6 +419,7 @@ def get_event_by_interests(request: InterestsRequest, background_tasks: Backgrou
             "success": True,
             "interests": request.interests,
             "mapped_categories": categories,
+            "mapping_method": mapping_method,  # "llm" or "keyword_fallback"
             "total_matching_events": len(events),
             "suggestion": suggestion,
             "event_details": {
@@ -370,8 +443,9 @@ def get_event_by_interests(request: InterestsRequest, background_tasks: Backgrou
         background_tasks.add_task(log_to_supabase, {
             "timestamp": datetime.now().isoformat(),
             "endpoint": "/api/event/by-interests",
-            "interests": request.interests,
+            "interests": request.interests if hasattr(request, 'interests') else "unknown",
             "mapped_categories": None,
+            "mapping_method": "error",
             "total_matching_events": 0,
             "selected_event_id": None,
             "selected_event_name": None,
