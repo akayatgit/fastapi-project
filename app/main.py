@@ -674,3 +674,430 @@ def clear_audit_logs():
         "success": True,
         "message": "All audit logs cleared"
     })
+
+@app.get("/api/logs/analytics", response_class=HTMLResponse)
+def view_analytics_dashboard(
+    time_filter: str = "all",  # all, hour, day, week, custom
+    start_date: str = None,
+    end_date: str = None,
+    endpoint: str = "all",  # all, /api/event/by-interests, /
+    status: str = "all",  # all, success, failed
+    sort_by: str = "timestamp",  # timestamp, duration, status
+    order: str = "desc"  # asc, desc
+):
+    """
+    Advanced analytics dashboard with filters for data scientists
+    """
+    from datetime import timedelta
+    
+    # Filter logs based on criteria
+    filtered_logs = audit_logs.copy()
+    
+    # Time filtering
+    now = datetime.now()
+    if time_filter == "hour":
+        cutoff = now - timedelta(hours=1)
+        filtered_logs = [log for log in filtered_logs if datetime.fromisoformat(log["timestamp"]) > cutoff]
+    elif time_filter == "day":
+        cutoff = now - timedelta(days=1)
+        filtered_logs = [log for log in filtered_logs if datetime.fromisoformat(log["timestamp"]) > cutoff]
+    elif time_filter == "week":
+        cutoff = now - timedelta(weeks=1)
+        filtered_logs = [log for log in filtered_logs if datetime.fromisoformat(log["timestamp"]) > cutoff]
+    elif time_filter == "custom" and start_date and end_date:
+        start = datetime.fromisoformat(start_date)
+        end = datetime.fromisoformat(end_date)
+        filtered_logs = [log for log in filtered_logs 
+                        if start <= datetime.fromisoformat(log["timestamp"]) <= end]
+    
+    # Endpoint filtering
+    if endpoint != "all":
+        filtered_logs = [log for log in filtered_logs if log["path"] == endpoint]
+    
+    # Status filtering
+    if status == "success":
+        filtered_logs = [log for log in filtered_logs if log.get("success", False)]
+    elif status == "failed":
+        filtered_logs = [log for log in filtered_logs if not log.get("success", True)]
+    
+    # Sorting
+    if sort_by == "timestamp":
+        filtered_logs.sort(key=lambda x: x["timestamp"], reverse=(order == "desc"))
+    elif sort_by == "duration":
+        filtered_logs.sort(key=lambda x: x.get("duration_ms", 0), reverse=(order == "desc"))
+    elif sort_by == "status":
+        filtered_logs.sort(key=lambda x: x.get("success", False), reverse=(order == "desc"))
+    
+    # Calculate advanced analytics
+    total_filtered = len(filtered_logs)
+    successful = sum(1 for log in filtered_logs if log.get("success", False))
+    failed = total_filtered - successful
+    success_rate = round((successful / total_filtered * 100) if total_filtered > 0 else 0, 2)
+    
+    durations = [log.get("duration_ms", 0) for log in filtered_logs if log.get("duration_ms")]
+    avg_duration = round(sum(durations) / len(durations) if durations else 0, 2)
+    min_duration = round(min(durations) if durations else 0, 2)
+    max_duration = round(max(durations) if durations else 0, 2)
+    median_duration = round(sorted(durations)[len(durations)//2] if durations else 0, 2)
+    
+    # Percentiles
+    p95_duration = round(sorted(durations)[int(len(durations)*0.95)] if durations else 0, 2)
+    p99_duration = round(sorted(durations)[int(len(durations)*0.99)] if durations else 0, 2)
+    
+    # Endpoint distribution
+    endpoint_counts = {}
+    for log in filtered_logs:
+        path = log.get("path", "unknown")
+        endpoint_counts[path] = endpoint_counts.get(path, 0) + 1
+    
+    # Method distribution
+    method_counts = {}
+    for log in filtered_logs:
+        method = log.get("method", "unknown")
+        method_counts[method] = method_counts.get(method, 0) + 1
+    
+    # Error analysis
+    error_types = {}
+    for log in filtered_logs:
+        if not log.get("success", True) and log.get("error"):
+            error = log.get("error", "Unknown")[:100]  # First 100 chars
+            error_types[error] = error_types.get(error, 0) + 1
+    
+    # Client analysis
+    client_ips = {}
+    for log in filtered_logs:
+        ip = log.get("client_ip", "unknown")
+        client_ips[ip] = client_ips.get(ip, 0) + 1
+    
+    # Time series data (requests per minute)
+    time_series = {}
+    for log in filtered_logs:
+        timestamp = datetime.fromisoformat(log["timestamp"])
+        minute_key = timestamp.strftime("%Y-%m-%d %H:%M")
+        time_series[minute_key] = time_series.get(minute_key, 0) + 1
+    
+    # Generate HTML
+    return HTMLResponse(content=generate_analytics_html(
+        filtered_logs, total_filtered, successful, failed, success_rate,
+        avg_duration, min_duration, max_duration, median_duration,
+        p95_duration, p99_duration, endpoint_counts, method_counts,
+        error_types, client_ips, time_series, time_filter, endpoint, status,
+        sort_by, order
+    ))
+
+def generate_analytics_html(
+    logs, total, successful, failed, success_rate, avg_duration, min_duration,
+    max_duration, median_duration, p95, p99, endpoint_counts, method_counts,
+    error_types, client_ips, time_series, time_filter, endpoint_filter,
+    status_filter, sort_by, order
+):
+    """Generate advanced analytics HTML"""
+    
+    # Generate endpoint options
+    endpoint_options = ""
+    unique_endpoints = set(log["path"] for log in audit_logs)
+    for ep in sorted(unique_endpoints):
+        selected = "selected" if ep == endpoint_filter else ""
+        endpoint_options += f'<option value="{ep}" {selected}>{ep}</option>'
+    
+    # Generate log rows
+    log_rows = ""
+    for i, log in enumerate(logs[:100]):  # Show top 100
+        success_icon = "✅" if log.get("success", False) else "❌"
+        row_class = "success-row" if log.get("success", False) else "error-row"
+        request_body = json.dumps(log.get("request_body", {}), indent=2) if log.get("request_body") else "N/A"
+        error_msg = log.get("error", "N/A")
+        
+        log_rows += f"""
+        <tr class="{row_class}">
+            <td>{i+1}</td>
+            <td>{success_icon}</td>
+            <td>{log.get('method', 'N/A')}</td>
+            <td>{log.get('path', 'N/A')}</td>
+            <td>{log.get('status_code', 'N/A')}</td>
+            <td>{log.get('duration_ms', 0):.2f}</td>
+            <td>{log.get('timestamp', 'N/A')}</td>
+            <td>{log.get('client_ip', 'N/A')}</td>
+            <td class="truncate" title="{request_body}">{request_body[:50]}...</td>
+            <td class="truncate" title="{error_msg}">{error_msg[:50] if error_msg != 'N/A' else 'N/A'}</td>
+        </tr>
+        """
+    
+    # Generate charts data
+    endpoint_chart_data = json.dumps([{"name": k, "value": v} for k, v in sorted(endpoint_counts.items(), key=lambda x: x[1], reverse=True)[:10]])
+    method_chart_data = json.dumps([{"name": k, "value": v} for k, v in method_counts.items()])
+    time_series_data = json.dumps([{"time": k, "count": v} for k, v in sorted(time_series.items())])
+    
+    html = f"""<!DOCTYPE html>
+    <html>
+    <head>
+        <title>Spotive API - Advanced Analytics</title>
+        <meta charset="UTF-8">
+        <style>
+            * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+            body {{ font-family: 'Segoe UI', system-ui, sans-serif; background: #f5f7fa; padding: 20px; }}
+            .container {{ max-width: 1600px; margin: 0 auto; }}
+            .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; border-radius: 12px; margin-bottom: 30px; }}
+            .header h1 {{ font-size: 2.5em; margin-bottom: 10px; }}
+            .filters {{ background: white; padding: 25px; border-radius: 12px; margin-bottom: 30px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }}
+            .filter-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 20px; }}
+            .filter-group {{ display: flex; flex-direction: column; }}
+            .filter-group label {{ font-weight: 600; margin-bottom: 8px; color: #333; }}
+            .filter-group select, .filter-group input {{ padding: 10px; border: 2px solid #e1e8ed; border-radius: 6px; font-size: 14px; }}
+            .filter-group select:focus, .filter-group input:focus {{ outline: none; border-color: #667eea; }}
+            .btn {{ background: #667eea; color: white; padding: 12px 24px; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; }}
+            .btn:hover {{ background: #5568d3; }}
+            .btn-export {{ background: #2ecc71; margin-left: 10px; }}
+            .btn-export:hover {{ background: #27ae60; }}
+            .stats-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px; }}
+            .stat-card {{ background: white; padding: 25px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }}
+            .stat-label {{ font-size: 0.9em; color: #666; margin-bottom: 8px; }}
+            .stat-value {{ font-size: 2.2em; font-weight: bold; color: #667eea; }}
+            .stat-value.success {{ color: #2ecc71; }}
+            .stat-value.error {{ color: #e74c3c; }}
+            .chart-container {{ background: white; padding: 25px; border-radius: 12px; margin-bottom: 30px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }}
+            .chart-title {{ font-size: 1.3em; font-weight: 600; margin-bottom: 20px; color: #333; }}
+            .chart-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 20px; }}
+            .table-container {{ background: white; padding: 25px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); overflow-x: auto; }}
+            table {{ width: 100%; border-collapse: collapse; }}
+            th {{ background: #667eea; color: white; padding: 15px; text-align: left; font-weight: 600; }}
+            td {{ padding: 12px 15px; border-bottom: 1px solid #e1e8ed; }}
+            .success-row {{ background: #d4edda; }}
+            .error-row {{ background: #f8d7da; }}
+            tr:hover {{ background: #f8f9fa; }}
+            .truncate {{ max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: help; }}
+            .chart-bar {{ background: #667eea; height: 30px; margin: 5px 0; display: flex; align-items: center; padding-left: 10px; color: white; border-radius: 4px; }}
+            .distribution-item {{ display: flex; justify-content: space-between; padding: 10px; border-bottom: 1px solid #e1e8ed; }}
+            .distribution-item:hover {{ background: #f8f9fa; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>📊 Advanced Analytics Dashboard</h1>
+                <p>Data Science & Performance Analytics</p>
+            </div>
+
+            <div class="filters">
+                <form method="get" action="/api/logs/analytics">
+                    <div class="filter-grid">
+                        <div class="filter-group">
+                            <label>Time Range</label>
+                            <select name="time_filter" id="timeFilter">
+                                <option value="all" {'selected' if time_filter == 'all' else ''}>All Time</option>
+                                <option value="hour" {'selected' if time_filter == 'hour' else ''}>Past Hour</option>
+                                <option value="day" {'selected' if time_filter == 'day' else ''}>Past 24 Hours</option>
+                                <option value="week" {'selected' if time_filter == 'week' else ''}>Past Week</option>
+                                <option value="custom" {'selected' if time_filter == 'custom' else ''}>Custom Range</option>
+                            </select>
+                        </div>
+                        <div class="filter-group">
+                            <label>Endpoint</label>
+                            <select name="endpoint">
+                                <option value="all">All Endpoints</option>
+                                {endpoint_options}
+                            </select>
+                        </div>
+                        <div class="filter-group">
+                            <label>Status</label>
+                            <select name="status">
+                                <option value="all" {'selected' if status_filter == 'all' else ''}>All</option>
+                                <option value="success" {'selected' if status_filter == 'success' else ''}>Success Only</option>
+                                <option value="failed" {'selected' if status_filter == 'failed' else ''}>Failed Only</option>
+                            </select>
+                        </div>
+                        <div class="filter-group">
+                            <label>Sort By</label>
+                            <select name="sort_by">
+                                <option value="timestamp" {'selected' if sort_by == 'timestamp' else ''}>Timestamp</option>
+                                <option value="duration" {'selected' if sort_by == 'duration' else ''}>Duration</option>
+                                <option value="status" {'selected' if sort_by == 'status' else ''}>Status</option>
+                            </select>
+                        </div>
+                        <div class="filter-group">
+                            <label>Order</label>
+                            <select name="order">
+                                <option value="desc" {'selected' if order == 'desc' else ''}>Descending</option>
+                                <option value="asc" {'selected' if order == 'asc' else ''}>Ascending</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="filter-grid" id="customDates" style="display: {'block' if time_filter == 'custom' else 'none'};">
+                        <div class="filter-group">
+                            <label>Start Date</label>
+                            <input type="datetime-local" name="start_date">
+                        </div>
+                        <div class="filter-group">
+                            <label>End Date</label>
+                            <input type="datetime-local" name="end_date">
+                        </div>
+                    </div>
+                    <button type="submit" class="btn">🔍 Apply Filters</button>
+                    <button type="button" class="btn btn-export" onclick="exportToCSV()">📥 Export CSV</button>
+                </form>
+            </div>
+
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-label">Total Requests</div>
+                    <div class="stat-value">{total}</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Successful</div>
+                    <div class="stat-value success">{successful}</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Failed</div>
+                    <div class="stat-value error">{failed}</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Success Rate</div>
+                    <div class="stat-value">{success_rate}%</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Avg Response Time</div>
+                    <div class="stat-value">{avg_duration}ms</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Min Response Time</div>
+                    <div class="stat-value">{min_duration}ms</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Max Response Time</div>
+                    <div class="stat-value">{max_duration}ms</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Median Response Time</div>
+                    <div class="stat-value">{median_duration}ms</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">P95 Response Time</div>
+                    <div class="stat-value">{p95}ms</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">P99 Response Time</div>
+                    <div class="stat-value">{p99}ms</div>
+                </div>
+            </div>
+
+            <div class="chart-grid">
+                <div class="chart-container">
+                    <div class="chart-title">📍 Top Endpoints</div>
+                    {"".join([f'<div class="distribution-item"><span>{k}</span><strong>{v} requests</strong></div>' for k, v in sorted(endpoint_counts.items(), key=lambda x: x[1], reverse=True)[:10]])}
+                </div>
+                <div class="chart-container">
+                    <div class="chart-title">🔧 HTTP Methods</div>
+                    {"".join([f'<div class="distribution-item"><span>{k}</span><strong>{v} requests</strong></div>' for k, v in sorted(method_counts.items(), key=lambda x: x[1], reverse=True)])}
+                </div>
+            </div>
+
+            {"<div class='chart-container'><div class='chart-title'>⚠️ Top Errors</div>" + "".join([f'<div class="distribution-item"><span class="truncate" title="{k}">{k[:80]}</span><strong>{v} times</strong></div>' for k, v in sorted(error_types.items(), key=lambda x: x[1], reverse=True)[:10]]) + "</div>" if error_types else ""}
+
+            <div class="chart-container">
+                <div class="chart-title">👥 Top Clients</div>
+                {"".join([f'<div class="distribution-item"><span>{k}</span><strong>{v} requests</strong></div>' for k, v in sorted(client_ips.items(), key=lambda x: x[1], reverse=True)[:10]])}
+            </div>
+
+            <div class="table-container">
+                <h2 class="chart-title">📋 Detailed Logs (Top 100)</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Status</th>
+                            <th>Method</th>
+                            <th>Endpoint</th>
+                            <th>Code</th>
+                            <th>Duration (ms)</th>
+                            <th>Timestamp</th>
+                            <th>Client IP</th>
+                            <th>Request Body</th>
+                            <th>Error</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {log_rows}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <script>
+            document.getElementById('timeFilter').addEventListener('change', function() {{
+                document.getElementById('customDates').style.display = 
+                    this.value === 'custom' ? 'block' : 'none';
+            }});
+
+            function exportToCSV() {{
+                window.location.href = '/api/logs/export?time_filter={time_filter}&endpoint={endpoint_filter}&status={status_filter}';
+            }}
+        </script>
+    </body>
+    </html>
+    """
+    
+    return html
+
+@app.get("/api/logs/export")
+def export_logs_csv(
+    time_filter: str = "all",
+    endpoint: str = "all",
+    status: str = "all"
+):
+    """Export filtered logs as CSV for data analysis"""
+    from datetime import timedelta
+    import csv
+    from io import StringIO
+    
+    # Apply same filtering logic
+    filtered_logs = audit_logs.copy()
+    
+    # Time filtering
+    now = datetime.now()
+    if time_filter == "hour":
+        cutoff = now - timedelta(hours=1)
+        filtered_logs = [log for log in filtered_logs if datetime.fromisoformat(log["timestamp"]) > cutoff]
+    elif time_filter == "day":
+        cutoff = now - timedelta(days=1)
+        filtered_logs = [log for log in filtered_logs if datetime.fromisoformat(log["timestamp"]) > cutoff]
+    elif time_filter == "week":
+        cutoff = now - timedelta(weeks=1)
+        filtered_logs = [log for log in filtered_logs if datetime.fromisoformat(log["timestamp"]) > cutoff]
+    
+    if endpoint != "all":
+        filtered_logs = [log for log in filtered_logs if log["path"] == endpoint]
+    
+    if status == "success":
+        filtered_logs = [log for log in filtered_logs if log.get("success", False)]
+    elif status == "failed":
+        filtered_logs = [log for log in filtered_logs if not log.get("success", True)]
+    
+    # Create CSV
+    output = StringIO()
+    writer = csv.DictWriter(output, fieldnames=[
+        'timestamp', 'method', 'path', 'status_code', 'duration_ms',
+        'success', 'client_ip', 'user_agent', 'request_body', 'error'
+    ])
+    writer.writeheader()
+    
+    for log in filtered_logs:
+        writer.writerow({
+            'timestamp': log.get('timestamp', ''),
+            'method': log.get('method', ''),
+            'path': log.get('path', ''),
+            'status_code': log.get('status_code', ''),
+            'duration_ms': log.get('duration_ms', 0),
+            'success': log.get('success', False),
+            'client_ip': log.get('client_ip', ''),
+            'user_agent': log.get('user_agent', ''),
+            'request_body': json.dumps(log.get('request_body', {})),
+            'error': log.get('error', '')
+        })
+    
+    from fastapi.responses import StreamingResponse
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=spotive_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"}
+    )
