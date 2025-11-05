@@ -320,7 +320,81 @@ def view_audit_logs():
     """
     View all audit logs in a nice HTML format for debugging
     """
-    html_content = """
+    # Calculate statistics first
+    total_logs = len(audit_logs)
+    successful_logs = sum(1 for log in audit_logs if log.get("success", False))
+    failed_logs = total_logs - successful_logs
+    success_rate = round((successful_logs / total_logs * 100) if total_logs > 0 else 0, 1)
+    avg_duration = round(sum(log.get("duration_ms", 0) for log in audit_logs) / total_logs if total_logs > 0 else 0, 2)
+    
+    # Generate log entries HTML
+    log_entries_html = ""
+    if total_logs > 0:
+        for log in reversed(audit_logs):  # Show newest first
+            success_class = "success" if log.get("success", False) else "error"
+            status_class = "success" if log.get("success", False) else "error"
+            
+            # Format request body
+            request_body_html = ""
+            if "request_body" in log and log["request_body"]:
+                request_body_html = f"""
+                <div class="log-row">
+                    <div class="log-label">Request Body:</div>
+                    <div class="log-value">
+                        <div class="json-box">
+                            <pre>{json.dumps(log["request_body"], indent=2)}</pre>
+                        </div>
+                    </div>
+                </div>
+                """
+            
+            # Format error
+            error_html = ""
+            if log.get("error"):
+                error_html = f"""
+                <div class="error-box">
+                    <strong>❌ Error:</strong> {log["error"]}<br>
+                    <strong>Type:</strong> {log.get("error_type", "Unknown")}
+                </div>
+                """
+            
+            log_entries_html += f"""
+            <div class="log-entry {success_class}">
+                <div class="log-header">
+                    <div>
+                        <span class="method {log['method']}">{log['method']}</span>
+                        <strong>{log['path']}</strong>
+                    </div>
+                    <div>
+                        <span class="status {status_class}">Status: {log.get('status_code', 'N/A')}</span>
+                    </div>
+                </div>
+                <div class="log-details">
+                    <div class="log-row">
+                        <div class="log-label">Timestamp:</div>
+                        <div class="log-value">{log['timestamp']}</div>
+                    </div>
+                    <div class="log-row">
+                        <div class="log-label">Client IP:</div>
+                        <div class="log-value">{log.get('client_ip', 'unknown')}</div>
+                    </div>
+                    <div class="log-row">
+                        <div class="log-label">User Agent:</div>
+                        <div class="log-value">{log.get('user_agent', 'unknown')}</div>
+                    </div>
+                    <div class="log-row">
+                        <div class="log-label">Duration:</div>
+                        <div class="log-value">{log.get('duration_ms', 0)} ms</div>
+                    </div>
+                    {request_body_html}
+                    {error_html}
+                </div>
+            </div>
+            """
+    else:
+        log_entries_html = "<p style='text-align: center; color: #999; font-size: 1.2em; padding: 40px;'>📭 No logs yet. Make some API calls to see them here!</p>"
+    
+    html_content = f"""
     <!DOCTYPE html>
     <html>
     <head>
@@ -488,101 +562,16 @@ def view_audit_logs():
         </div>
         
         <div class="logs-container">
-            {log_entries}
+            {log_entries_html}
         </div>
-        
-        {no_logs_message}
         
         <script>
             // Auto-refresh every 5 seconds
-            setTimeout(function(){{ location.reload(); }}, 5000);
+            setTimeout(function() {{ location.reload(); }}, 5000);
         </script>
     </body>
     </html>
     """
-    
-    # Calculate statistics
-    total_logs = len(audit_logs)
-    successful_logs = sum(1 for log in audit_logs if log.get("success", False))
-    failed_logs = total_logs - successful_logs
-    success_rate = round((successful_logs / total_logs * 100) if total_logs > 0 else 0, 1)
-    avg_duration = round(sum(log.get("duration_ms", 0) for log in audit_logs) / total_logs if total_logs > 0 else 0, 2)
-    
-    # Generate log entries HTML
-    log_entries_html = ""
-    for log in reversed(audit_logs):  # Show newest first
-        success_class = "success" if log.get("success", False) else "error"
-        status_class = "success" if log.get("success", False) else "error"
-        
-        # Format request body
-        request_body_html = ""
-        if "request_body" in log and log["request_body"]:
-            request_body_html = f"""
-            <div class="log-row">
-                <div class="log-label">Request Body:</div>
-                <div class="log-value">
-                    <div class="json-box">
-                        <pre>{json.dumps(log["request_body"], indent=2)}</pre>
-                    </div>
-                </div>
-            </div>
-            """
-        
-        # Format error
-        error_html = ""
-        if log.get("error"):
-            error_html = f"""
-            <div class="error-box">
-                <strong>❌ Error:</strong> {log["error"]}<br>
-                <strong>Type:</strong> {log.get("error_type", "Unknown")}
-            </div>
-            """
-        
-        log_entries_html += f"""
-        <div class="log-entry {success_class}">
-            <div class="log-header">
-                <div>
-                    <span class="method {log['method']}">{log['method']}</span>
-                    <strong>{log['path']}</strong>
-                </div>
-                <div>
-                    <span class="status {status_class}">Status: {log.get('status_code', 'N/A')}</span>
-                </div>
-            </div>
-            <div class="log-details">
-                <div class="log-row">
-                    <div class="log-label">Timestamp:</div>
-                    <div class="log-value">{log['timestamp']}</div>
-                </div>
-                <div class="log-row">
-                    <div class="log-label">Client IP:</div>
-                    <div class="log-value">{log.get('client_ip', 'unknown')}</div>
-                </div>
-                <div class="log-row">
-                    <div class="log-label">User Agent:</div>
-                    <div class="log-value">{log.get('user_agent', 'unknown')}</div>
-                </div>
-                <div class="log-row">
-                    <div class="log-label">Duration:</div>
-                    <div class="log-value">{log.get('duration_ms', 0)} ms</div>
-                </div>
-                {request_body_html}
-                {error_html}
-            </div>
-        </div>
-        """
-    
-    no_logs_message = "" if total_logs > 0 else "<p style='text-align: center; color: #999; font-size: 1.2em;'>No logs yet. Make some API calls to see them here!</p>"
-    
-    # Fill in the template
-    html_content = html_content.format(
-        total_logs=total_logs,
-        success_rate=success_rate,
-        failed_logs=failed_logs,
-        avg_duration=avg_duration,
-        log_entries=log_entries_html,
-        no_logs_message=no_logs_message
-    )
     
     return HTMLResponse(content=html_content)
 
