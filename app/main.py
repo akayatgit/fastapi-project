@@ -154,12 +154,14 @@ Your job is to map user interests to our predefined event categories.
 class InterestsRequest(BaseModel):
     interests: str  # Comma-separated interests
     phone_number: str = None  # Optional: for personalized recommendations
+    hotel_id: str = None  # Optional: filter events by hotel location
     
     class Config:
         json_schema_extra = {
             "example": {
                 "interests": "music, outdoor, adventure",
-                "phone_number": "+919876543210"
+                "phone_number": "+919876543210",
+                "hotel_id": "marriott-bangalore"
             }
         }
 
@@ -203,8 +205,113 @@ class DiscoverEventsRequest(BaseModel):
             }
         }
 
-# Helper functions for user management
+# ==================== HOTEL MANAGEMENT MODELS ====================
+
+class HotelCreate(BaseModel):
+    name: str
+    slug: str  # URL-friendly identifier
+    location_city: str
+    location_area: str = None
+    address: str = None
+    country_code: str = "IN"
+    timezone: str = "Asia/Kolkata"
+    logo_url: str = None
+    brand_colors: Dict[str, str] = {"primary": "#000000", "secondary": "#FFFFFF"}
+    theme_config: Dict[str, Any] = {}
+    latitude: float = None
+    longitude: float = None
+    search_radius_km: int = 10
+    metadata: Dict[str, Any] = {}
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "name": "Taj Wellington Mews",
+                "slug": "taj-mumbai",
+                "location_city": "Mumbai",
+                "location_area": "Colaba",
+                "address": "123 MG Road, Mumbai",
+                "logo_url": "https://example.com/logo.png",
+                "brand_colors": {
+                    "primary": "#C4A962",
+                    "secondary": "#1A1A1A"
+                },
+                "latitude": 18.9220,
+                "longitude": 72.8347,
+                "search_radius_km": 15
+            }
+        }
+
+class HotelUpdate(BaseModel):
+    name: str = None
+    location_city: str = None
+    location_area: str = None
+    address: str = None
+    logo_url: str = None
+    brand_colors: Dict[str, str] = None
+    theme_config: Dict[str, Any] = None
+    latitude: float = None
+    longitude: float = None
+    search_radius_km: int = None
+    is_active: bool = None
+    metadata: Dict[str, Any] = None
+
+class HotelServiceCreate(BaseModel):
+    service_type: str  # spa, restaurant, bar, tour, cab, etc.
+    name: str
+    description: str = None
+    short_description: str = None
+    price_range: str = None
+    price_min: float = None
+    price_max: float = None
+    currency: str = "INR"
+    available_hours: str = None
+    image_url: str = None
+    booking_link: str = None
+    phone_number: str = None
+    is_featured: bool = False
+    display_order: int = 0
+    metadata: Dict[str, Any] = {}
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "service_type": "spa",
+                "name": "Jiva Spa",
+                "short_description": "Rejuvenating spa treatments",
+                "description": "Experience traditional Indian wellness...",
+                "price_range": "₹3000 - ₹8000",
+                "price_min": 3000,
+                "price_max": 8000,
+                "available_hours": "10:00 AM - 10:00 PM",
+                "image_url": "https://example.com/spa.jpg",
+                "booking_link": "https://hotel.com/spa",
+                "phone_number": "+912212345678",
+                "is_featured": True,
+                "display_order": 1
+            }
+        }
+
+class HotelServiceUpdate(BaseModel):
+    service_type: str = None
+    name: str = None
+    description: str = None
+    short_description: str = None
+    price_range: str = None
+    price_min: float = None
+    price_max: float = None
+    available_hours: str = None
+    image_url: str = None
+    booking_link: str = None
+    phone_number: str = None
+    is_featured: bool = None
+    display_order: int = None
+    is_active: bool = None
+    metadata: Dict[str, Any] = None
+
+# Helper functions for user management and hotel operations
 import re
+from math import radians, cos, sin, asin, sqrt
 
 def validate_phone_number(phone: str) -> bool:
     """Validate Indian phone number format: +91XXXXXXXXXX"""
@@ -295,6 +402,154 @@ def get_user_top_categories(phone_number: str, limit: int = 3) -> List[str]:
         return [cat for cat, _ in sorted_categories[:limit]]
     except Exception as e:
         print(f"Error getting user top categories: {e}")
+        return []
+
+def get_hotel_by_id_or_slug(hotel_id: str) -> Dict[str, Any]:
+    """Get hotel details by ID or slug"""
+    try:
+        # Try by ID first
+        result = supabase.table('hotels').select("*").eq('id', hotel_id).execute()
+        
+        # If not found, try by slug
+        if not result.data:
+            result = supabase.table('hotels').select("*").eq('slug', hotel_id).execute()
+        
+        if result.data:
+            return result.data[0]
+        return None
+    except Exception as e:
+        print(f"Error getting hotel: {e}")
+        return None
+
+def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """
+    Calculate distance between two points using Haversine formula
+    Returns distance in kilometers
+    """
+    if not all([lat1, lon1, lat2, lon2]):
+        return float('inf')
+    
+    # Convert to radians
+    lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
+    
+    # Haversine formula
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+    c = 2 * asin(sqrt(a))
+    
+    # Earth radius in kilometers
+    r = 6371
+    
+    return c * r
+
+def filter_events_by_hotel_location(events: List[Dict], hotel: Dict[str, Any]) -> List[Dict]:
+    """
+    Filter and sort events based on hotel location and search radius
+    Returns events within radius, sorted by distance
+    """
+    if not hotel:
+        return events
+    
+    hotel_lat = hotel.get('latitude')
+    hotel_lon = hotel.get('longitude')
+    hotel_city = hotel.get('location_city', '').lower()
+    search_radius = hotel.get('search_radius_km', 10)
+    
+    filtered_events = []
+    
+    for event in events:
+        # If hotel has coordinates and event has coordinates, use distance
+        event_lat = event.get('latitude')
+        event_lon = event.get('longitude')
+        
+        if hotel_lat and hotel_lon and event_lat and event_lon:
+            distance = calculate_distance(hotel_lat, hotel_lon, event_lat, event_lon)
+            if distance <= search_radius:
+                event['distance_km'] = round(distance, 2)
+                filtered_events.append(event)
+        else:
+            # Fallback: Filter by city name
+            event_location = event.get('location', '').lower()
+            if hotel_city in event_location or 'bangalore' in event_location:
+                event['distance_km'] = None  # Unknown distance
+                filtered_events.append(event)
+    
+    # Sort by distance (closest first), events without distance go to end
+    filtered_events.sort(key=lambda x: x.get('distance_km') if x.get('distance_km') is not None else float('inf'))
+    
+    return filtered_events
+
+def get_hotel_services_as_events(hotel_id: str, categories: List[str]) -> List[Dict]:
+    """
+    Get hotel services and format them as event objects
+    Matches services to requested categories
+    """
+    try:
+        # Get hotel
+        hotel = get_hotel_by_id_or_slug(hotel_id)
+        if not hotel:
+            return []
+        
+        actual_hotel_id = hotel['id']
+        
+        # Get all active services for the hotel
+        services_response = supabase.table('hotel_services')\
+            .select("*")\
+            .eq('hotel_id', actual_hotel_id)\
+            .eq('is_active', True)\
+            .order('is_featured', desc=True)\
+            .order('display_order')\
+            .execute()
+        
+        if not services_response.data:
+            return []
+        
+        # Map service types to event categories
+        service_to_category_map = {
+            'spa': 'entertainment',
+            'restaurant': 'food',
+            'bar': 'entertainment',
+            'gym': 'sports',
+            'pool': 'outdoor',
+            'tour': 'outdoor',
+            'cab': 'entertainment',
+            'room_service': 'food'
+        }
+        
+        # Convert services to event format
+        service_events = []
+        for service in services_response.data:
+            service_type = service.get('service_type', '')
+            category = service_to_category_map.get(service_type, 'entertainment')
+            
+            # Only include if matches requested categories
+            if categories and category not in categories:
+                continue
+            
+            # Format as event object
+            service_event = {
+                'id': service.get('id'),
+                'name': service.get('name'),
+                'category': category,
+                'description': service.get('description') or service.get('short_description', ''),
+                'location': f"{hotel.get('name')} - {hotel.get('location_area', hotel.get('location_city'))}",
+                'date': 'Available daily',
+                'time': service.get('available_hours', 'Contact hotel'),
+                'price': service.get('price_range', 'See hotel for pricing'),
+                'image_url': service.get('image_url'),
+                'booking_link': service.get('booking_link'),
+                'is_hotel_service': True,
+                'service_type': service_type,
+                'hotel_id': actual_hotel_id,
+                'distance_km': 0,  # Hotel services are at 0 distance
+                'is_featured': service.get('is_featured', False)
+            }
+            service_events.append(service_event)
+        
+        return service_events
+    except Exception as e:
+        print(f"Error getting hotel services: {e}")
         return []
 
 # Keyword-based category matching as fallback
@@ -410,6 +665,560 @@ def read_root():
         },
         "note": "Connected to Supabase with LLM-powered conversational responses" if llm_available else "Connected to Supabase (LLM unavailable)"
     }
+
+# ==================== HOTEL MANAGEMENT ENDPOINTS ====================
+
+@app.post("/api/hotels")
+def create_hotel(hotel: HotelCreate):
+    """
+    Create a new hotel in the system
+    
+    Request body:
+    - name: Hotel name
+    - slug: URL-friendly identifier (must be unique)
+    - location_city: City where hotel is located
+    - location_area: Specific area/neighborhood
+    - brand_colors: Primary and secondary colors
+    - logo_url: URL to hotel logo
+    - search_radius_km: Default search radius for events
+    
+    Returns the created hotel with ID
+    """
+    try:
+        # Check if slug already exists
+        existing = supabase.table('hotels').select("id").eq('slug', hotel.slug).execute()
+        if existing.data:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "error": f"Hotel with slug '{hotel.slug}' already exists"
+                }
+            )
+        
+        # Prepare hotel data
+        hotel_data = {
+            "name": hotel.name,
+            "slug": hotel.slug,
+            "location_city": hotel.location_city,
+            "location_area": hotel.location_area,
+            "address": hotel.address,
+            "country_code": hotel.country_code,
+            "timezone": hotel.timezone,
+            "logo_url": hotel.logo_url,
+            "brand_colors": hotel.brand_colors,
+            "theme_config": hotel.theme_config,
+            "latitude": hotel.latitude,
+            "longitude": hotel.longitude,
+            "search_radius_km": hotel.search_radius_km,
+            "metadata": hotel.metadata,
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat()
+        }
+        
+        # Insert hotel
+        result = supabase.table('hotels').insert(hotel_data).execute()
+        
+        return JSONResponse(content={
+            "success": True,
+            "message": "Hotel created successfully",
+            "hotel": result.data[0] if result.data else hotel_data
+        })
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": str(e)
+            }
+        )
+
+@app.get("/api/hotels")
+def list_hotels(is_active: bool = None):
+    """
+    List all hotels in the system
+    
+    Query parameters:
+    - is_active: Filter by active status (optional)
+    
+    Returns list of all hotels
+    """
+    try:
+        query = supabase.table('hotels').select("*")
+        
+        if is_active is not None:
+            query = query.eq('is_active', is_active)
+        
+        result = query.order('created_at', desc=True).execute()
+        
+        return JSONResponse(content={
+            "success": True,
+            "count": len(result.data) if result.data else 0,
+            "hotels": result.data if result.data else []
+        })
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": str(e)
+            }
+        )
+
+@app.get("/api/hotels/{hotel_id}")
+def get_hotel(hotel_id: str):
+    """
+    Get hotel details by ID or slug
+    
+    Path parameter:
+    - hotel_id: Hotel UUID or slug
+    
+    Returns complete hotel information
+    """
+    try:
+        # Try to get by ID first
+        result = supabase.table('hotels').select("*").eq('id', hotel_id).execute()
+        
+        # If not found, try by slug
+        if not result.data:
+            result = supabase.table('hotels').select("*").eq('slug', hotel_id).execute()
+        
+        if not result.data:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "success": False,
+                    "error": "Hotel not found"
+                }
+            )
+        
+        return JSONResponse(content={
+            "success": True,
+            "hotel": result.data[0]
+        })
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": str(e)
+            }
+        )
+
+@app.put("/api/hotels/{hotel_id}")
+def update_hotel(hotel_id: str, hotel: HotelUpdate):
+    """
+    Update hotel information
+    
+    Path parameter:
+    - hotel_id: Hotel UUID or slug
+    
+    Request body: All fields are optional, only provided fields will be updated
+    """
+    try:
+        # Check if hotel exists
+        existing = supabase.table('hotels').select("id").eq('id', hotel_id).execute()
+        if not existing.data:
+            existing = supabase.table('hotels').select("id").eq('slug', hotel_id).execute()
+        
+        if not existing.data:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "success": False,
+                    "error": "Hotel not found"
+                }
+            )
+        
+        actual_hotel_id = existing.data[0]['id']
+        
+        # Prepare update data (only non-None fields)
+        update_data = {}
+        if hotel.name is not None:
+            update_data['name'] = hotel.name
+        if hotel.location_city is not None:
+            update_data['location_city'] = hotel.location_city
+        if hotel.location_area is not None:
+            update_data['location_area'] = hotel.location_area
+        if hotel.address is not None:
+            update_data['address'] = hotel.address
+        if hotel.logo_url is not None:
+            update_data['logo_url'] = hotel.logo_url
+        if hotel.brand_colors is not None:
+            update_data['brand_colors'] = hotel.brand_colors
+        if hotel.theme_config is not None:
+            update_data['theme_config'] = hotel.theme_config
+        if hotel.latitude is not None:
+            update_data['latitude'] = hotel.latitude
+        if hotel.longitude is not None:
+            update_data['longitude'] = hotel.longitude
+        if hotel.search_radius_km is not None:
+            update_data['search_radius_km'] = hotel.search_radius_km
+        if hotel.is_active is not None:
+            update_data['is_active'] = hotel.is_active
+        if hotel.metadata is not None:
+            update_data['metadata'] = hotel.metadata
+        
+        update_data['updated_at'] = datetime.now().isoformat()
+        
+        # Update hotel
+        result = supabase.table('hotels').update(update_data).eq('id', actual_hotel_id).execute()
+        
+        return JSONResponse(content={
+            "success": True,
+            "message": "Hotel updated successfully",
+            "hotel": result.data[0] if result.data else update_data
+        })
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": str(e)
+            }
+        )
+
+@app.delete("/api/hotels/{hotel_id}")
+def delete_hotel(hotel_id: str):
+    """
+    Delete a hotel (soft delete by setting is_active=false)
+    
+    Path parameter:
+    - hotel_id: Hotel UUID or slug
+    """
+    try:
+        # Update is_active to false instead of hard delete
+        result = supabase.table('hotels').update({
+            "is_active": False,
+            "updated_at": datetime.now().isoformat()
+        }).eq('id', hotel_id).execute()
+        
+        if not result.data:
+            result = supabase.table('hotels').update({
+                "is_active": False,
+                "updated_at": datetime.now().isoformat()
+            }).eq('slug', hotel_id).execute()
+        
+        if not result.data:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "success": False,
+                    "error": "Hotel not found"
+                }
+            )
+        
+        return JSONResponse(content={
+            "success": True,
+            "message": "Hotel deactivated successfully"
+        })
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": str(e)
+            }
+        )
+
+@app.get("/api/hotels/{hotel_id}/config")
+def get_hotel_config(hotel_id: str):
+    """
+    Get hotel configuration for kiosk frontend
+    
+    Path parameter:
+    - hotel_id: Hotel UUID or slug
+    
+    Returns hotel branding, location settings, and configuration
+    """
+    try:
+        # Get hotel by ID or slug
+        result = supabase.table('hotels').select("*").eq('id', hotel_id).execute()
+        if not result.data:
+            result = supabase.table('hotels').select("*").eq('slug', hotel_id).execute()
+        
+        if not result.data:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "success": False,
+                    "error": "Hotel not found"
+                }
+            )
+        
+        hotel = result.data[0]
+        
+        # Return configuration optimized for frontend
+        return JSONResponse(content={
+            "success": True,
+            "config": {
+                "hotel_id": hotel['id'],
+                "hotel_name": hotel['name'],
+                "slug": hotel['slug'],
+                "branding": {
+                    "logo_url": hotel.get('logo_url'),
+                    "brand_colors": hotel.get('brand_colors', {}),
+                    "theme_config": hotel.get('theme_config', {})
+                },
+                "location": {
+                    "city": hotel['location_city'],
+                    "area": hotel.get('location_area'),
+                    "address": hotel.get('address'),
+                    "latitude": hotel.get('latitude'),
+                    "longitude": hotel.get('longitude'),
+                    "search_radius_km": hotel.get('search_radius_km', 10)
+                },
+                "settings": {
+                    "timezone": hotel.get('timezone', 'Asia/Kolkata'),
+                    "country_code": hotel.get('country_code', 'IN'),
+                    "is_active": hotel.get('is_active', True)
+                }
+            }
+        })
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": str(e)
+            }
+        )
+
+# ==================== HOTEL SERVICES ENDPOINTS ====================
+
+@app.post("/api/hotels/{hotel_id}/services")
+def create_hotel_service(hotel_id: str, service: HotelServiceCreate):
+    """
+    Create a new service for a hotel (spa, restaurant, bar, etc.)
+    
+    Path parameter:
+    - hotel_id: Hotel UUID or slug
+    
+    Request body: Service details including type, name, pricing, etc.
+    """
+    try:
+        # Verify hotel exists
+        hotel_result = supabase.table('hotels').select("id").eq('id', hotel_id).execute()
+        if not hotel_result.data:
+            hotel_result = supabase.table('hotels').select("id").eq('slug', hotel_id).execute()
+        
+        if not hotel_result.data:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "success": False,
+                    "error": "Hotel not found"
+                }
+            )
+        
+        actual_hotel_id = hotel_result.data[0]['id']
+        
+        # Prepare service data
+        service_data = {
+            "hotel_id": actual_hotel_id,
+            "service_type": service.service_type,
+            "name": service.name,
+            "description": service.description,
+            "short_description": service.short_description,
+            "price_range": service.price_range,
+            "price_min": service.price_min,
+            "price_max": service.price_max,
+            "currency": service.currency,
+            "available_hours": service.available_hours,
+            "image_url": service.image_url,
+            "booking_link": service.booking_link,
+            "phone_number": service.phone_number,
+            "is_featured": service.is_featured,
+            "display_order": service.display_order,
+            "metadata": service.metadata,
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat()
+        }
+        
+        # Insert service
+        result = supabase.table('hotel_services').insert(service_data).execute()
+        
+        return JSONResponse(content={
+            "success": True,
+            "message": "Service created successfully",
+            "service": result.data[0] if result.data else service_data
+        })
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": str(e)
+            }
+        )
+
+@app.get("/api/hotels/{hotel_id}/services")
+def list_hotel_services(hotel_id: str, service_type: str = None, is_featured: bool = None, is_active: bool = True):
+    """
+    List all services for a hotel
+    
+    Path parameter:
+    - hotel_id: Hotel UUID or slug
+    
+    Query parameters:
+    - service_type: Filter by service type (spa, restaurant, bar, etc.)
+    - is_featured: Filter by featured status
+    - is_active: Filter by active status (default: true)
+    
+    Returns list of hotel services
+    """
+    try:
+        # Get hotel ID
+        hotel_result = supabase.table('hotels').select("id").eq('id', hotel_id).execute()
+        if not hotel_result.data:
+            hotel_result = supabase.table('hotels').select("id").eq('slug', hotel_id).execute()
+        
+        if not hotel_result.data:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "success": False,
+                    "error": "Hotel not found"
+                }
+            )
+        
+        actual_hotel_id = hotel_result.data[0]['id']
+        
+        # Build query
+        query = supabase.table('hotel_services').select("*").eq('hotel_id', actual_hotel_id)
+        
+        if service_type:
+            query = query.eq('service_type', service_type)
+        if is_featured is not None:
+            query = query.eq('is_featured', is_featured)
+        if is_active is not None:
+            query = query.eq('is_active', is_active)
+        
+        result = query.order('display_order').order('created_at', desc=True).execute()
+        
+        return JSONResponse(content={
+            "success": True,
+            "count": len(result.data) if result.data else 0,
+            "services": result.data if result.data else []
+        })
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": str(e)
+            }
+        )
+
+@app.put("/api/hotels/{hotel_id}/services/{service_id}")
+def update_hotel_service(hotel_id: str, service_id: str, service: HotelServiceUpdate):
+    """
+    Update a hotel service
+    
+    Path parameters:
+    - hotel_id: Hotel UUID or slug
+    - service_id: Service UUID
+    
+    Request body: All fields are optional
+    """
+    try:
+        # Prepare update data
+        update_data = {}
+        if service.service_type is not None:
+            update_data['service_type'] = service.service_type
+        if service.name is not None:
+            update_data['name'] = service.name
+        if service.description is not None:
+            update_data['description'] = service.description
+        if service.short_description is not None:
+            update_data['short_description'] = service.short_description
+        if service.price_range is not None:
+            update_data['price_range'] = service.price_range
+        if service.price_min is not None:
+            update_data['price_min'] = service.price_min
+        if service.price_max is not None:
+            update_data['price_max'] = service.price_max
+        if service.available_hours is not None:
+            update_data['available_hours'] = service.available_hours
+        if service.image_url is not None:
+            update_data['image_url'] = service.image_url
+        if service.booking_link is not None:
+            update_data['booking_link'] = service.booking_link
+        if service.phone_number is not None:
+            update_data['phone_number'] = service.phone_number
+        if service.is_featured is not None:
+            update_data['is_featured'] = service.is_featured
+        if service.display_order is not None:
+            update_data['display_order'] = service.display_order
+        if service.is_active is not None:
+            update_data['is_active'] = service.is_active
+        if service.metadata is not None:
+            update_data['metadata'] = service.metadata
+        
+        update_data['updated_at'] = datetime.now().isoformat()
+        
+        # Update service
+        result = supabase.table('hotel_services').update(update_data).eq('id', service_id).execute()
+        
+        if not result.data:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "success": False,
+                    "error": "Service not found"
+                }
+            )
+        
+        return JSONResponse(content={
+            "success": True,
+            "message": "Service updated successfully",
+            "service": result.data[0]
+        })
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": str(e)
+            }
+        )
+
+@app.delete("/api/hotels/{hotel_id}/services/{service_id}")
+def delete_hotel_service(hotel_id: str, service_id: str):
+    """
+    Delete a hotel service (soft delete)
+    
+    Path parameters:
+    - hotel_id: Hotel UUID or slug
+    - service_id: Service UUID
+    """
+    try:
+        result = supabase.table('hotel_services').update({
+            "is_active": False,
+            "updated_at": datetime.now().isoformat()
+        }).eq('id', service_id).execute()
+        
+        if not result.data:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "success": False,
+                    "error": "Service not found"
+                }
+            )
+        
+        return JSONResponse(content={
+            "success": True,
+            "message": "Service deactivated successfully"
+        })
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": str(e)
+            }
+        )
 
 # ==================== USER MANAGEMENT ENDPOINTS ====================
 
@@ -823,19 +1632,33 @@ def discover_events_personalized(phone_number: str, request: DiscoverEventsReque
         )
 
 @app.post("/api/event/by-interests")
-def get_event_by_interests(request: InterestsRequest, background_tasks: BackgroundTasks, req: Request):
+def get_event_by_interests(
+    request: InterestsRequest, 
+    background_tasks: BackgroundTasks, 
+    req: Request,
+    session_id: str = None
+):
     """
-    Get events based on user interests. The LLM maps interests to categories and queries matching events.
+    Get events based on user interests with optional hotel-specific filtering.
     
     Request body:
     - interests: Comma-separated interests (e.g., "music, outdoor, adventure")
     - phone_number: Optional phone number for tracking and personalization (+91XXXXXXXXXX)
+    - hotel_id: Optional hotel ID or slug for location-based filtering
+    
+    Query parameters:
+    - session_id: Optional session ID for real-time results push to frontend
     
     The system will:
     1. Use AI to map interests to event categories
     2. Query events matching those categories
-    3. Return up to 5 matching events (or all if less than 5) with conversational descriptions
-    4. If phone_number is provided, track search history and accumulate user preferences
+    3. If hotel_id provided:
+       - Prioritize hotel's own services (spa, restaurant, bar)
+       - Filter external events by hotel location and search radius
+       - Sort by distance from hotel
+    4. Return up to 5 matching events with conversational descriptions
+    5. If phone_number provided, track search history and accumulate preferences
+    6. If session_id provided, write results to kiosk_results table for real-time push
     
     NOTE: For full personalization features, use /api/users/{phone_number}/discover-events
     """
@@ -904,6 +1727,27 @@ def get_event_by_interests(request: InterestsRequest, background_tasks: Backgrou
             if response.data:
                 events.extend(response.data)
         
+        # Step 2.5: Hotel-specific filtering (if hotel_id provided)
+        hotel = None
+        hotel_services = []
+        if request.hotel_id:
+            print(f"DEBUG - Filtering events for hotel: {request.hotel_id}")
+            hotel = get_hotel_by_id_or_slug(request.hotel_id)
+            
+            if hotel:
+                # Get hotel services first (priority)
+                hotel_services = get_hotel_services_as_events(request.hotel_id, categories)
+                print(f"DEBUG - Found {len(hotel_services)} hotel services matching categories")
+                
+                # Filter external events by hotel location
+                events = filter_events_by_hotel_location(events, hotel)
+                print(f"DEBUG - After location filtering: {len(events)} external events")
+                
+                # Combine: Hotel services first, then nearby events
+                events = hotel_services + events
+            else:
+                print(f"DEBUG - Hotel not found: {request.hotel_id}")
+        
         if not events or len(events) == 0:
             # Log to Supabase (async)
             response_time = (datetime.now() - start_time).total_seconds() * 1000
@@ -960,19 +1804,28 @@ def get_event_by_interests(request: InterestsRequest, background_tasks: Backgrou
             else:
                 suggestion = f"Check out {event.get('name', 'this event')} at {event.get('location', 'Bangalore')}! {event.get('description', 'An exciting event.')} It's on {event.get('date', 'soon')} at {event.get('time', 'TBA')}."
             
+            event_details = {
+                "id": event.get("id"),
+                "name": event.get("name"),
+                "category": event.get("category"),
+                "location": event.get("location"),
+                "date": event.get("date"),
+                "time": event.get("time"),
+                "price": event.get("price"),
+                "image_url": event.get("image_url"),
+                "booking_link": event.get("booking_link")
+            }
+            
+            # Add hotel-specific fields if hotel_id was provided
+            if request.hotel_id:
+                event_details["is_hotel_service"] = event.get("is_hotel_service", False)
+                event_details["distance_km"] = event.get("distance_km")
+                if event.get("is_hotel_service"):
+                    event_details["service_type"] = event.get("service_type")
+            
             events_with_suggestions.append({
                 "suggestion": suggestion,
-                "event_details": {
-                    "id": event.get("id"),
-                    "name": event.get("name"),
-                    "category": event.get("category"),
-                    "location": event.get("location"),
-                    "date": event.get("date"),
-                    "time": event.get("time"),
-                    "price": event.get("price"),
-                    "image_url": event.get("image_url"),
-                    "booking_link": event.get("booking_link")
-                }
+                "event_details": event_details
             })
         
         # Track user search if phone_number provided (optional)
@@ -1005,7 +1858,7 @@ def get_event_by_interests(request: InterestsRequest, background_tasks: Backgrou
         })
         
         # Return the conversational response
-        return JSONResponse(content={
+        response_data = {
             "success": True,
             "interests": request.interests,
             "mapped_categories": categories,
@@ -1016,7 +1869,36 @@ def get_event_by_interests(request: InterestsRequest, background_tasks: Backgrou
             "source": "Supabase",
             "ai_generated": llm_available,
             "personalized": bool(request.phone_number)  # Indicate if tracking was enabled
-        })
+        }
+        
+        # Add hotel-specific information if hotel filtering was used
+        if request.hotel_id and hotel:
+            response_data["hotel_filtered"] = True
+            response_data["hotel"] = {
+                "id": hotel.get("id"),
+                "name": hotel.get("name"),
+                "slug": hotel.get("slug"),
+                "location": hotel.get("location_city"),
+                "search_radius_km": hotel.get("search_radius_km", 10)
+            }
+            response_data["hotel_services_count"] = len(hotel_services)
+        else:
+            response_data["hotel_filtered"] = False
+        
+        # Write results to kiosk_results table for real-time push (if session_id provided)
+        if session_id:
+            try:
+                supabase.table('kiosk_results').insert({
+                    "session_id": session_id,
+                    "results": response_data,
+                    "created_at": datetime.now().isoformat()
+                }).execute()
+                print(f"✅ Results written to session: {session_id}")
+            except Exception as e:
+                print(f"⚠️ Failed to write kiosk results: {e}")
+                # Don't fail the request if this fails
+        
+        return JSONResponse(content=response_data)
             
     except Exception as e:
         # Log to Supabase (async) - ERROR CASE

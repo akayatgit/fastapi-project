@@ -1,6 +1,6 @@
-# Supabase Database Setup for User Profiles
+# Supabase Database Setup for Hotel Kiosk System
 
-This document contains the SQL commands to create the required tables for the User Profiles & Preferences feature.
+This document contains the SQL commands to create the required tables for the Hotel Kiosk system.
 
 ## Prerequisites
 
@@ -9,7 +9,302 @@ This document contains the SQL commands to create the required tables for the Us
 
 ---
 
-## Table 1: `users`
+## 🏨 Hotel Management Tables
+
+### Table 1: `hotels`
+
+Stores hotel information and branding configuration.
+
+```sql
+CREATE TABLE hotels (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    name TEXT NOT NULL,
+    slug TEXT UNIQUE NOT NULL,  -- URL-friendly identifier
+    location_city TEXT NOT NULL,
+    location_area TEXT,
+    address TEXT,
+    country_code TEXT DEFAULT 'IN',  -- ISO country code
+    timezone TEXT DEFAULT 'Asia/Kolkata',
+    
+    -- Branding & Configuration
+    logo_url TEXT,
+    brand_colors JSONB DEFAULT '{"primary": "#000000", "secondary": "#FFFFFF"}'::jsonb,
+    theme_config JSONB DEFAULT '{}'::jsonb,
+    
+    -- Location Settings
+    latitude DECIMAL(10, 8),
+    longitude DECIMAL(11, 8),
+    search_radius_km INTEGER DEFAULT 10,  -- Default search radius for nearby events
+    
+    -- Status & Metadata
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    metadata JSONB DEFAULT '{}'::jsonb
+);
+
+-- Create indexes
+CREATE INDEX idx_hotels_slug ON hotels(slug);
+CREATE INDEX idx_hotels_location_city ON hotels(location_city);
+CREATE INDEX idx_hotels_is_active ON hotels(is_active);
+CREATE INDEX idx_hotels_created_at ON hotels(created_at DESC);
+```
+
+**Columns:**
+- `id`: Unique hotel identifier (UUID)
+- `slug`: URL-friendly identifier (e.g., "taj-mumbai")
+- `location_city`: City where hotel is located
+- `location_area`: Specific area/neighborhood
+- `brand_colors`: JSONB with primary/secondary colors
+- `search_radius_km`: How far to search for nearby events (default 10km)
+- `is_active`: Whether kiosk is currently operational
+
+---
+
+### Table 2: `hotel_services`
+
+Stores in-house hotel services for upselling (spa, restaurant, bar, tours, etc.)
+
+```sql
+CREATE TABLE hotel_services (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    hotel_id UUID NOT NULL REFERENCES hotels(id) ON DELETE CASCADE,
+    
+    -- Service Information
+    service_type TEXT NOT NULL,  -- 'spa', 'restaurant', 'bar', 'tour', 'cab', 'room_service', 'gym'
+    name TEXT NOT NULL,
+    description TEXT,
+    short_description TEXT,  -- For card display
+    
+    -- Pricing & Availability
+    price_range TEXT,  -- e.g., "₹2000 - ₹5000"
+    price_min DECIMAL(10, 2),
+    price_max DECIMAL(10, 2),
+    currency TEXT DEFAULT 'INR',
+    available_hours TEXT,  -- e.g., "10:00 AM - 10:00 PM"
+    
+    -- Media & Booking
+    image_url TEXT,
+    booking_link TEXT,
+    phone_number TEXT,
+    
+    -- Display Settings
+    is_featured BOOLEAN DEFAULT false,  -- Show prominently
+    display_order INTEGER DEFAULT 0,    -- Sort order
+    is_active BOOLEAN DEFAULT true,
+    
+    -- Timestamps
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    metadata JSONB DEFAULT '{}'::jsonb
+);
+
+-- Create indexes
+CREATE INDEX idx_hotel_services_hotel_id ON hotel_services(hotel_id);
+CREATE INDEX idx_hotel_services_service_type ON hotel_services(service_type);
+CREATE INDEX idx_hotel_services_is_featured ON hotel_services(is_featured);
+CREATE INDEX idx_hotel_services_display_order ON hotel_services(display_order);
+```
+
+**Service Types:**
+- `spa` - Spa services, massages, treatments
+- `restaurant` - In-house dining, room service
+- `bar` - Bar, lounge, happy hour
+- `tour` - Hotel-organized tours, experiences
+- `cab` - Cab booking, airport transfers
+- `room_service` - Food delivery to room
+- `gym` - Fitness center, yoga classes
+- `pool` - Pool access, poolside service
+- `other` - Custom services
+
+---
+
+### Table 3: `kiosk_results`
+
+Stores real-time results for kiosk sessions (enables Next.js to display results).
+
+```sql
+CREATE TABLE kiosk_results (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    results JSONB NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Indexes for fast lookups
+CREATE INDEX idx_kiosk_results_session ON kiosk_results(session_id);
+CREATE INDEX idx_kiosk_results_created ON kiosk_results(created_at DESC);
+
+-- Enable Supabase Real-Time (CRITICAL!)
+ALTER TABLE kiosk_results REPLICA IDENTITY FULL;
+
+-- Auto-cleanup function (delete results older than 1 hour)
+CREATE OR REPLACE FUNCTION cleanup_old_kiosk_results()
+RETURNS void AS $$
+BEGIN
+    DELETE FROM kiosk_results
+    WHERE created_at < NOW() - INTERVAL '1 hour';
+END;
+$$ LANGUAGE plpgsql;
+```
+
+**Purpose:** 
+- Temporary storage for event search results
+- Enables real-time push to Next.js frontend
+- Auto-cleanup keeps database clean
+- Each session gets its own results
+
+**Important:** Run `ALTER TABLE kiosk_results REPLICA IDENTITY FULL;` to enable real-time subscriptions!
+
+---
+
+### Table 4: `hotel_kiosk_sessions` (Optional - Analytics)
+
+Tracks guest interactions with the kiosk for analytics.
+
+```sql
+CREATE TABLE hotel_kiosk_sessions (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    hotel_id UUID NOT NULL REFERENCES hotels(id) ON DELETE CASCADE,
+    
+    -- Session Information
+    session_id TEXT,  -- Frontend-generated session ID
+    session_timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    
+    -- Guest Interaction
+    guest_interests TEXT,
+    mapped_categories JSONB,
+    results_shown JSONB,  -- Array of event/service IDs shown
+    
+    -- Actions
+    whatsapp_sent BOOLEAN DEFAULT false,
+    items_shared_count INTEGER DEFAULT 0,
+    
+    -- Settings
+    language TEXT DEFAULT 'en',
+    voice_enabled BOOLEAN DEFAULT false,
+    
+    -- Performance
+    duration_seconds INTEGER,
+    
+    -- Metadata
+    user_agent TEXT,
+    device_info JSONB DEFAULT '{}'::jsonb,
+    metadata JSONB DEFAULT '{}'::jsonb
+);
+
+-- Create indexes
+CREATE INDEX idx_kiosk_sessions_hotel_id ON hotel_kiosk_sessions(hotel_id);
+CREATE INDEX idx_kiosk_sessions_timestamp ON hotel_kiosk_sessions(session_timestamp DESC);
+CREATE INDEX idx_kiosk_sessions_whatsapp ON hotel_kiosk_sessions(whatsapp_sent);
+```
+
+**Purpose:** Analytics and tracking for hotel operators to see:
+- How many guests use the kiosk
+- What they search for
+- Conversion rates (WhatsApp shares)
+- Popular interests per hotel
+
+---
+
+## 📊 Events Table Update
+
+Update the existing `events` table to support hotel-specific filtering and location tracking:
+
+```sql
+-- Add hotel relationship columns to events table
+ALTER TABLE events 
+ADD COLUMN IF NOT EXISTS hotel_id UUID REFERENCES hotels(id) ON DELETE SET NULL,
+ADD COLUMN IF NOT EXISTS is_hotel_service BOOLEAN DEFAULT false,
+ADD COLUMN IF NOT EXISTS service_type TEXT,
+ADD COLUMN IF NOT EXISTS distance_from_hotel_km DECIMAL(5, 2),
+ADD COLUMN IF NOT EXISTS latitude DECIMAL(10, 8),
+ADD COLUMN IF NOT EXISTS longitude DECIMAL(11, 8);
+
+-- Create indexes
+CREATE INDEX IF NOT EXISTS idx_events_hotel_id ON events(hotel_id);
+CREATE INDEX IF NOT EXISTS idx_events_is_hotel_service ON events(is_hotel_service);
+CREATE INDEX IF NOT EXISTS idx_events_location ON events(latitude, longitude);
+```
+
+**New Columns:**
+- `hotel_id`: Link event to specific hotel (NULL = general event)
+- `is_hotel_service`: True if this is an in-house service (vs external event)
+- `service_type`: Type if it's a hotel service (spa, restaurant, etc.)
+- `distance_from_hotel_km`: Pre-calculated distance for sorting
+- `latitude`: Event latitude for distance calculation
+- `longitude`: Event longitude for distance calculation
+
+---
+
+## 📍 Adding Location Data to Existing Events
+
+If you have existing events, you can add coordinates manually or in bulk:
+
+### **Method 1: Manual Update (Single Event)**
+
+```sql
+-- Update a specific event with coordinates
+UPDATE events
+SET 
+    latitude = 12.9716,
+    longitude = 77.5946
+WHERE name = 'Sunburn Music Festival';
+```
+
+### **Method 2: Bulk Update by Location String**
+
+For events in well-known locations:
+
+```sql
+-- Palace Grounds, Bangalore
+UPDATE events
+SET latitude = 13.0155, longitude = 77.5696
+WHERE location LIKE '%Palace Grounds%';
+
+-- Indiranagar, Bangalore  
+UPDATE events
+SET latitude = 12.9716, longitude = 77.6412
+WHERE location LIKE '%Indiranagar%';
+
+-- Koramangala, Bangalore
+UPDATE events
+SET latitude = 12.9352, longitude = 77.6245
+WHERE location LIKE '%Koramangala%';
+
+-- Whitefield, Bangalore
+UPDATE events
+SET latitude = 12.9698, longitude = 77.7499
+WHERE location LIKE '%Whitefield%';
+
+-- MG Road, Bangalore
+UPDATE events
+SET latitude = 12.9716, longitude = 77.5946
+WHERE location LIKE '%MG Road%';
+
+-- Nandi Hills
+UPDATE events
+SET latitude = 13.3704, longitude = 77.6839
+WHERE location LIKE '%Nandi Hills%';
+```
+
+### **Method 3: Default to City Center (Fallback)**
+
+For events without specific location:
+
+```sql
+-- Set Bangalore city center as default for events without coordinates
+UPDATE events
+SET latitude = 12.9716, longitude = 77.5946
+WHERE latitude IS NULL 
+  AND location LIKE '%Bangalore%';
+```
+
+---
+
+## 👥 User Profiles Tables
+
+### Table 4: `users`
 
 Stores user profile information and accumulated preferences.
 
