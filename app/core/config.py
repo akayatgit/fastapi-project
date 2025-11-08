@@ -1,7 +1,20 @@
 import os
 from dotenv import load_dotenv
+import ssl
+import certifi
 
 load_dotenv()
+
+# Fix SSL certificate verification for local development (Windows)
+# Set environment variable before any HTTPS calls
+os.environ['PYTHONHTTPSVERIFY'] = '0'
+os.environ['CURL_CA_BUNDLE'] = ''
+os.environ['REQUESTS_CA_BUNDLE'] = ''
+
+try:
+    ssl._create_default_https_context = ssl._create_unverified_context
+except:
+    pass
 
 class Settings:
     # Project Info

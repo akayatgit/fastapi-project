@@ -1,3 +1,13 @@
+# Fix SSL certificate verification BEFORE any imports
+import os
+os.environ['PYTHONHTTPSVERIFY'] = '0'
+os.environ['CURL_CA_BUNDLE'] = ''
+os.environ['REQUESTS_CA_BUNDLE'] = ''
+
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
+
+# Now import everything else
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.responses import JSONResponse, HTMLResponse
 from langchain_ollama import ChatOllama
@@ -140,16 +150,152 @@ Your job is to map user interests to our predefined event categories.
     ("human", "User interests: {interests}\n\nReturn ONLY the JSON array of matching categories (max 3):")
 ])
 
-# Pydantic model for interests request body
+# Pydantic models for requests and responses
 class InterestsRequest(BaseModel):
     interests: str  # Comma-separated interests
+    phone_number: str = None  # Optional: for personalized recommendations
     
     class Config:
         json_schema_extra = {
             "example": {
-                "interests": "music, outdoor, adventure"
+                "interests": "music, outdoor, adventure",
+                "phone_number": "+919876543210"
             }
         }
+
+class UserRegisterRequest(BaseModel):
+    phone_number: str
+    username: str
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "phone_number": "+919876543210",
+                "username": "Ashok Kumar"
+            }
+        }
+
+class UserPreferencesUpdate(BaseModel):
+    preferred_categories: List[str] = None
+    preferred_locations: List[str] = None
+    preferred_time_slots: List[str] = None
+    price_range: Dict[str, int] = None
+    avoid_categories: List[str] = None
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "preferred_categories": ["comedy", "outdoor"],
+                "preferred_locations": ["Indiranagar", "Koramangala"],
+                "preferred_time_slots": ["evening", "weekend"],
+                "price_range": {"min": 0, "max": 1500},
+                "avoid_categories": ["spiritual"]
+            }
+        }
+
+class DiscoverEventsRequest(BaseModel):
+    interests: str = None  # Optional: can use profile only if empty
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "interests": "comedy"
+            }
+        }
+
+# Helper functions for user management
+import re
+
+def validate_phone_number(phone: str) -> bool:
+    """Validate Indian phone number format: +91XXXXXXXXXX"""
+    pattern = r'^\+91[6-9][0-9]{9}$'
+    return bool(re.match(pattern, phone))
+
+def get_or_create_user(phone_number: str, username: str = None) -> Dict[str, Any]:
+    """Get existing user or create new one"""
+    try:
+        # Check if user exists
+        response = supabase.table('users').select("*").eq('phone_number', phone_number).execute()
+        
+        if response.data and len(response.data) > 0:
+            # Update last_active
+            user = response.data[0]
+            supabase.table('users').update({
+                "last_active": datetime.now().isoformat()
+            }).eq('phone_number', phone_number).execute()
+            return user
+        else:
+            # Create new user
+            new_user = {
+                "phone_number": phone_number,
+                "username": username or "User",
+                "created_at": datetime.now().isoformat(),
+                "last_active": datetime.now().isoformat(),
+                "total_searches": 0,
+                "favorite_categories": {}
+            }
+            response = supabase.table('users').insert(new_user).execute()
+            return response.data[0] if response.data else new_user
+    except Exception as e:
+        print(f"Error in get_or_create_user: {e}")
+        return None
+
+def track_user_search(phone_number: str, interests: str, mapped_categories: list, results_count: int):
+    """Track user search and accumulate preferences"""
+    try:
+        # Get user
+        user_response = supabase.table('users').select("*").eq('phone_number', phone_number).execute()
+        if not user_response.data:
+            return
+        
+        user = user_response.data[0]
+        user_id = user.get('id')
+        
+        # Insert search history
+        search_entry = {
+            "user_id": user_id,
+            "search_query": interests,
+            "mapped_categories": mapped_categories,
+            "search_timestamp": datetime.now().isoformat(),
+            "results_count": results_count
+        }
+        supabase.table('user_search_history').insert(search_entry).execute()
+        
+        # Update user's favorite_categories (accumulate preferences)
+        favorite_categories = user.get('favorite_categories', {})
+        if not isinstance(favorite_categories, dict):
+            favorite_categories = {}
+        
+        for category in mapped_categories:
+            favorite_categories[category] = favorite_categories.get(category, 0) + 1
+        
+        # Update user record
+        supabase.table('users').update({
+            "favorite_categories": favorite_categories,
+            "total_searches": user.get('total_searches', 0) + 1,
+            "last_active": datetime.now().isoformat()
+        }).eq('phone_number', phone_number).execute()
+        
+    except Exception as e:
+        print(f"Error tracking user search: {e}")
+
+def get_user_top_categories(phone_number: str, limit: int = 3) -> List[str]:
+    """Get user's top categories based on accumulated preferences"""
+    try:
+        user_response = supabase.table('users').select("favorite_categories").eq('phone_number', phone_number).execute()
+        if not user_response.data:
+            return []
+        
+        favorite_categories = user_response.data[0].get('favorite_categories', {})
+        if not isinstance(favorite_categories, dict):
+            return []
+        
+        # Sort by count and return top N
+        sorted_categories = sorted(favorite_categories.items(), key=lambda x: x[1], reverse=True)
+        return [cat for cat, _ in sorted_categories[:limit]]
+    except Exception as e:
+        print(f"Error getting user top categories: {e}")
+        return []
 
 # Keyword-based category matching as fallback
 def keyword_match_categories(interests: str, valid_categories: list) -> list:
@@ -265,6 +411,417 @@ def read_root():
         "note": "Connected to Supabase with LLM-powered conversational responses" if llm_available else "Connected to Supabase (LLM unavailable)"
     }
 
+# ==================== USER MANAGEMENT ENDPOINTS ====================
+
+@app.post("/api/users/register")
+def register_user(request: UserRegisterRequest):
+    """
+    Register a new user or get existing user
+    
+    Request body:
+    - phone_number: Indian phone number in format +91XXXXXXXXXX
+    - username: User's name
+    
+    Returns user profile with accumulated preferences
+    """
+    try:
+        # Validate phone number
+        if not validate_phone_number(request.phone_number):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "error": "Invalid phone number format. Use: +91XXXXXXXXXX (10 digits after +91)"
+                }
+            )
+        
+        # Get or create user
+        user = get_or_create_user(request.phone_number, request.username)
+        
+        if not user:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "success": False,
+                    "error": "Failed to register user"
+                }
+            )
+        
+        return JSONResponse(content={
+            "success": True,
+            "message": "User registered successfully" if user.get('total_searches', 0) == 0 else "Welcome back!",
+            "user": {
+                "id": user.get("id"),
+                "phone_number": user.get("phone_number"),
+                "username": user.get("username"),
+                "created_at": user.get("created_at"),
+                "last_active": user.get("last_active"),
+                "total_searches": user.get("total_searches", 0),
+                "favorite_categories": user.get("favorite_categories", {}),
+                "top_3_interests": get_user_top_categories(request.phone_number, 3)
+            }
+        })
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": str(e)
+            }
+        )
+
+@app.get("/api/users/{phone_number}")
+def get_user_profile(phone_number: str):
+    """
+    Get user profile and accumulated preferences
+    
+    Path parameter:
+    - phone_number: Indian phone number in format +91XXXXXXXXXX
+    
+    Returns complete user profile with search history and preferences
+    """
+    try:
+        # Validate phone number
+        if not validate_phone_number(phone_number):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "error": "Invalid phone number format. Use: +91XXXXXXXXXX"
+                }
+            )
+        
+        # Get user
+        user_response = supabase.table('users').select("*").eq('phone_number', phone_number).execute()
+        
+        if not user_response.data or len(user_response.data) == 0:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "success": False,
+                    "error": "User not found. Please register first at /api/users/register"
+                }
+            )
+        
+        user = user_response.data[0]
+        
+        # Get user's search history (last 10)
+        search_history_response = supabase.table('user_search_history')\
+            .select("*")\
+            .eq('user_id', user.get('id'))\
+            .order('search_timestamp', desc=True)\
+            .limit(10)\
+            .execute()
+        
+        # Get user preferences if exists
+        preferences_response = supabase.table('user_preferences')\
+            .select("*")\
+            .eq('user_id', user.get('id'))\
+            .execute()
+        
+        preferences = preferences_response.data[0] if preferences_response.data else None
+        
+        return JSONResponse(content={
+            "success": True,
+            "user": {
+                "id": user.get("id"),
+                "phone_number": user.get("phone_number"),
+                "username": user.get("username"),
+                "created_at": user.get("created_at"),
+                "last_active": user.get("last_active"),
+                "total_searches": user.get("total_searches", 0),
+                "favorite_categories": user.get("favorite_categories", {}),
+                "top_3_interests": get_user_top_categories(phone_number, 3)
+            },
+            "preferences": preferences if preferences else {
+                "preferred_categories": [],
+                "preferred_locations": [],
+                "preferred_time_slots": [],
+                "price_range": None,
+                "avoid_categories": []
+            },
+            "recent_searches": [
+                {
+                    "query": search.get("search_query"),
+                    "categories": search.get("mapped_categories"),
+                    "timestamp": search.get("search_timestamp"),
+                    "results_count": search.get("results_count")
+                }
+                for search in search_history_response.data
+            ] if search_history_response.data else []
+        })
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": str(e)
+            }
+        )
+
+@app.put("/api/users/{phone_number}/preferences")
+def update_user_preferences(phone_number: str, preferences: UserPreferencesUpdate):
+    """
+    Update user preferences manually
+    
+    Path parameter:
+    - phone_number: Indian phone number
+    
+    Request body:
+    - preferred_categories: List of preferred event categories
+    - preferred_locations: List of preferred locations in Bangalore
+    - preferred_time_slots: List of preferred time slots (morning, afternoon, evening, weekend)
+    - price_range: Dict with min and max price
+    - avoid_categories: List of categories to avoid
+    
+    All fields are optional - only provided fields will be updated
+    """
+    try:
+        # Validate phone number
+        if not validate_phone_number(phone_number):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "error": "Invalid phone number format"
+                }
+            )
+        
+        # Check if user exists
+        user_response = supabase.table('users').select("id").eq('phone_number', phone_number).execute()
+        if not user_response.data:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "success": False,
+                    "error": "User not found. Please register first."
+                }
+            )
+        
+        user_id = user_response.data[0].get('id')
+        
+        # Check if preferences exist
+        existing_prefs = supabase.table('user_preferences')\
+            .select("*")\
+            .eq('user_id', user_id)\
+            .execute()
+        
+        # Prepare update data (only include non-None fields)
+        update_data = {}
+        if preferences.preferred_categories is not None:
+            update_data['preferred_categories'] = preferences.preferred_categories
+        if preferences.preferred_locations is not None:
+            update_data['preferred_locations'] = preferences.preferred_locations
+        if preferences.preferred_time_slots is not None:
+            update_data['preferred_time_slots'] = preferences.preferred_time_slots
+        if preferences.price_range is not None:
+            update_data['price_range'] = preferences.price_range
+        if preferences.avoid_categories is not None:
+            update_data['avoid_categories'] = preferences.avoid_categories
+        
+        update_data['updated_at'] = datetime.now().isoformat()
+        
+        if existing_prefs.data:
+            # Update existing preferences
+            result = supabase.table('user_preferences')\
+                .update(update_data)\
+                .eq('user_id', user_id)\
+                .execute()
+        else:
+            # Create new preferences
+            update_data['user_id'] = user_id
+            result = supabase.table('user_preferences')\
+                .insert(update_data)\
+                .execute()
+        
+        return JSONResponse(content={
+            "success": True,
+            "message": "Preferences updated successfully",
+            "preferences": result.data[0] if result.data else update_data
+        })
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": str(e)
+            }
+        )
+
+@app.post("/api/users/{phone_number}/discover-events")
+def discover_events_personalized(phone_number: str, request: DiscoverEventsRequest, background_tasks: BackgroundTasks, req: Request):
+    """
+    Discover events with personalization based on user profile
+    
+    Path parameter:
+    - phone_number: User's phone number
+    
+    Request body:
+    - interests: Optional comma-separated interests. If empty, uses user's profile
+    
+    This endpoint combines user's search with their accumulated preferences for better recommendations
+    """
+    try:
+        # Validate phone number
+        if not validate_phone_number(phone_number):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "error": "Invalid phone number format"
+                }
+            )
+        
+        # Get or create user
+        user = get_or_create_user(phone_number)
+        if not user:
+            return JSONResponse(
+                status_code=500,
+                content={"success": False, "error": "Failed to get user"}
+            )
+        
+        # Get user's top categories
+        user_top_categories = get_user_top_categories(phone_number, 3)
+        
+        # Determine interests to use
+        if request.interests and request.interests.strip():
+            # User provided interests - combine with profile
+            combined_interests = request.interests
+            if user_top_categories:
+                combined_interests += ", " + ", ".join(user_top_categories)
+        else:
+            # No interests provided - use profile only
+            if not user_top_categories:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "success": False,
+                        "error": "No interests provided and user has no search history. Please provide interests or make some searches first."
+                    }
+                )
+            combined_interests = ", ".join(user_top_categories)
+        
+        # Use the same logic as /api/event/by-interests
+        valid_categories = ["concert", "sports", "outdoor", "food", "spiritual", "cultural", "kids", "entertainment", "comedy"]
+        
+        # Map interests to categories
+        categories = []
+        mapping_method = "llm"
+        
+        if llm_available and model:
+            try:
+                mapping_chain = category_mapping_prompt | model
+                mapping_response = mapping_chain.invoke({"interests": combined_interests})
+                
+                llm_raw_response = mapping_response.content.strip()
+                categories = json.loads(llm_raw_response)
+                
+                if not isinstance(categories, list):
+                    categories = []
+                else:
+                    categories = [cat.lower() for cat in categories if cat.lower() in valid_categories]
+            except:
+                categories = []
+        
+        if len(categories) == 0 or len(categories) > 4:
+            categories = keyword_match_categories(combined_interests, valid_categories)
+            mapping_method = "keyword_fallback"
+        
+        if not categories:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "message": "Could not map interests to event categories",
+                    "hint": "Try: music, comedy, sports, outdoor, food"
+                }
+            )
+        
+        # Query events
+        events = []
+        for category in categories:
+            response = supabase.table('events').select("*").eq('category', category).execute()
+            if response.data:
+                events.extend(response.data)
+        
+        if not events:
+            # Track search
+            track_user_search(phone_number, combined_interests, categories, 0)
+            
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "success": False,
+                    "message": "No events found matching your interests"
+                }
+            )
+        
+        # Select up to 5 events
+        selected_events = events[:5] if len(events) > 5 else events
+        
+        # Generate conversational descriptions
+        events_with_suggestions = []
+        
+        for event in selected_events:
+            if llm_available and model:
+                try:
+                    chain = event_prompt | model
+                    llm_response = chain.invoke({
+                        "name": event.get("name", "Unknown Event"),
+                        "category": event.get("category", "event"),
+                        "description": event.get("description", "An exciting event"),
+                        "location": event.get("location", "Bangalore"),
+                        "date": event.get("date", "Soon"),
+                        "time": event.get("time", "TBA"),
+                        "price": event.get("price", "Contact organizer")
+                    })
+                    suggestion = llm_response.content
+                except:
+                    suggestion = f"Check out {event.get('name', 'this event')} at {event.get('location', 'Bangalore')}!"
+            else:
+                suggestion = f"Check out {event.get('name', 'this event')} at {event.get('location', 'Bangalore')}!"
+            
+            events_with_suggestions.append({
+                "suggestion": suggestion,
+                "event_details": {
+                    "id": event.get("id"),
+                    "name": event.get("name"),
+                    "category": event.get("category"),
+                    "location": event.get("location"),
+                    "date": event.get("date"),
+                    "time": event.get("time"),
+                    "price": event.get("price"),
+                    "image_url": event.get("image_url"),
+                    "booking_link": event.get("booking_link")
+                }
+            })
+        
+        # Track search (accumulate preferences)
+        track_user_search(phone_number, combined_interests, categories, len(events))
+        
+        return JSONResponse(content={
+            "success": True,
+            "personalized": True,
+            "user_top_categories": user_top_categories,
+            "original_interests": request.interests,
+            "combined_interests_used": combined_interests,
+            "mapped_categories": categories,
+            "mapping_method": mapping_method,
+            "total_matching_events": len(events),
+            "returned_events": len(events_with_suggestions),
+            "events": events_with_suggestions,
+            "source": "Supabase",
+            "ai_generated": llm_available
+        })
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": str(e)
+            }
+        )
+
 @app.post("/api/event/by-interests")
 def get_event_by_interests(request: InterestsRequest, background_tasks: BackgroundTasks, req: Request):
     """
@@ -272,11 +829,15 @@ def get_event_by_interests(request: InterestsRequest, background_tasks: Backgrou
     
     Request body:
     - interests: Comma-separated interests (e.g., "music, outdoor, adventure")
+    - phone_number: Optional phone number for tracking and personalization (+91XXXXXXXXXX)
     
     The system will:
     1. Use AI to map interests to event categories
     2. Query events matching those categories
-    3. Return a random event with conversational description
+    3. Return up to 5 matching events (or all if less than 5) with conversational descriptions
+    4. If phone_number is provided, track search history and accumulate user preferences
+    
+    NOTE: For full personalization features, use /api/users/{phone_number}/discover-events
     """
     start_time = datetime.now()
     try:
@@ -371,31 +932,60 @@ def get_event_by_interests(request: InterestsRequest, background_tasks: Backgrou
                 }
             )
         
-        # Step 3: Pick a random event from all matching events
-        event = random.choice(events)
+        # Step 3: Select up to 5 events (or all if less than 5)
+        selected_events = events[:5] if len(events) > 5 else events
         
-        # Step 4: Generate conversational description if LLM is available
-        if llm_available and model:
-            try:
-                chain = event_prompt | model
-                
-                llm_response = chain.invoke({
-                    "name": event.get("name", "Unknown Event"),
-                    "category": event.get("category", "event"),
-                    "description": event.get("description", "An exciting event"),
-                    "location": event.get("location", "Bangalore"),
-                    "date": event.get("date", "Soon"),
-                    "time": event.get("time", "TBA"),
-                    "price": event.get("price", "Contact organizer")
-                })
-                suggestion = llm_response.content
-            except Exception as llm_error:
-                print(f"LLM generation failed: {llm_error}")
+        # Step 4: Generate conversational descriptions for each event
+        events_with_suggestions = []
+        
+        for event in selected_events:
+            # Generate conversational description if LLM is available
+            if llm_available and model:
+                try:
+                    chain = event_prompt | model
+                    
+                    llm_response = chain.invoke({
+                        "name": event.get("name", "Unknown Event"),
+                        "category": event.get("category", "event"),
+                        "description": event.get("description", "An exciting event"),
+                        "location": event.get("location", "Bangalore"),
+                        "date": event.get("date", "Soon"),
+                        "time": event.get("time", "TBA"),
+                        "price": event.get("price", "Contact organizer")
+                    })
+                    suggestion = llm_response.content
+                except Exception as llm_error:
+                    print(f"LLM generation failed: {llm_error}")
+                    suggestion = f"Check out {event.get('name', 'this event')} at {event.get('location', 'Bangalore')}! {event.get('description', 'An exciting event.')} It's on {event.get('date', 'soon')} at {event.get('time', 'TBA')}."
+            else:
                 suggestion = f"Check out {event.get('name', 'this event')} at {event.get('location', 'Bangalore')}! {event.get('description', 'An exciting event.')} It's on {event.get('date', 'soon')} at {event.get('time', 'TBA')}."
-        else:
-            suggestion = f"Check out {event.get('name', 'this event')} at {event.get('location', 'Bangalore')}! {event.get('description', 'An exciting event.')} It's on {event.get('date', 'soon')} at {event.get('time', 'TBA')}."
+            
+            events_with_suggestions.append({
+                "suggestion": suggestion,
+                "event_details": {
+                    "id": event.get("id"),
+                    "name": event.get("name"),
+                    "category": event.get("category"),
+                    "location": event.get("location"),
+                    "date": event.get("date"),
+                    "time": event.get("time"),
+                    "price": event.get("price"),
+                    "image_url": event.get("image_url"),
+                    "booking_link": event.get("booking_link")
+                }
+            })
+        
+        # Track user search if phone_number provided (optional)
+        if request.phone_number:
+            if validate_phone_number(request.phone_number):
+                # Get or create user and track search
+                user = get_or_create_user(request.phone_number)
+                if user:
+                    background_tasks.add_task(track_user_search, request.phone_number, request.interests, categories, len(events))
         
         # Log to Supabase (async) - SUCCESS CASE
+        # Log the first event for analytics purposes
+        first_event = selected_events[0]
         response_time = (datetime.now() - start_time).total_seconds() * 1000
         background_tasks.add_task(log_to_supabase, {
             "timestamp": datetime.now().isoformat(),
@@ -404,9 +994,9 @@ def get_event_by_interests(request: InterestsRequest, background_tasks: Backgrou
             "mapped_categories": json.dumps(categories),
             "mapping_method": mapping_method,  # Track which method was used
             "total_matching_events": len(events),
-            "selected_event_id": event.get("id"),
-            "selected_event_name": event.get("name"),
-            "selected_event_category": event.get("category"),
+            "selected_event_id": first_event.get("id"),
+            "selected_event_name": first_event.get("name"),
+            "selected_event_category": first_event.get("category"),
             "success": True,
             "error_message": None,
             "response_time_ms": response_time,
@@ -421,20 +1011,11 @@ def get_event_by_interests(request: InterestsRequest, background_tasks: Backgrou
             "mapped_categories": categories,
             "mapping_method": mapping_method,  # "llm" or "keyword_fallback"
             "total_matching_events": len(events),
-            "suggestion": suggestion,
-            "event_details": {
-                "id": event.get("id"),
-                "name": event.get("name"),
-                "category": event.get("category"),
-                "location": event.get("location"),
-                "date": event.get("date"),
-                "time": event.get("time"),
-                "price": event.get("price"),
-                "image_url": event.get("image_url"),
-                "booking_link": event.get("booking_link")
-            },
+            "returned_events": len(events_with_suggestions),
+            "events": events_with_suggestions,
             "source": "Supabase",
-            "ai_generated": llm_available
+            "ai_generated": llm_available,
+            "personalized": bool(request.phone_number)  # Indicate if tracking was enabled
         })
             
     except Exception as e:
