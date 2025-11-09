@@ -10,20 +10,28 @@
 
 **Answer in 3 steps:**
 
-1. **Next.js generates `session_id`** and passes it to ElevenLabs when starting conversation
+1. **Next.js collects guest's phone number** upfront
    ```typescript
-   variables: { session_id: "abc-123" }
+   const phoneNumber = "+919876543210"  // From input field
    ```
 
-2. **ElevenLabs uses it in webhook** to call FastAPI
-   ```
-   POST /api/event/by-interests?session_id=abc-123
+2. **Next.js subscribes** to Supabase real-time for that phone_number
+   ```typescript
+   filter: `phone_number=eq.+919876543210`
    ```
 
-3. **Next.js subscribes** to Supabase real-time for that session_id
-   ```typescript
-   filter: `session_id=eq.abc-123`
+3. **ElevenLabs calls API** with phone_number in body
+   ```json
+   {"interests": "comedy", "phone_number": "+919876543210"}
    ```
+
+4. **FastAPI generates unique timestamp** and writes results
+   ```python
+   timestamp = int(time.time() * 1000)  # Current time in milliseconds
+   INSERT (phone_number, timestamp_millis, results)
+   ```
+
+5. **Next.js receives results** via Supabase real-time broadcast
 
 **Result:** Results appear on screen in real-time! ⚡ (50-150ms)
 
@@ -42,13 +50,32 @@ In a hotel kiosk system, there are **3 separate components** that need to commun
 When ElevenLabs calls the FastAPI backend, the Next.js frontend has **no way to know what results were returned**. This creates a disconnect between the voice response and the visual display.
 
 **The Solution:**
-Use **Supabase Real-Time** as a messaging bus to push results from FastAPI to Next.js in real-time, synchronized with the voice response.
+Use **Supabase Real-Time** as a messaging bus to push results from FastAPI to Next.js in real-time, synchronized with the voice response. We use **phone_number as the identifier** since we collect it anyway for WhatsApp sharing.
 
 **The Goal:**
+- ✅ Guest enters phone number once
 - ✅ Guest speaks: "I want comedy shows"
 - ✅ Guest hears: AI voice describing comedy events
 - ✅ Guest sees: Event cards appearing on screen simultaneously
 - ✅ Perfect synchronization between voice and visual
+
+---
+
+### **Why Phone Number Instead of Session ID?**
+
+**Advantages:**
+- ✅ Already collecting phone for WhatsApp feature
+- ✅ No need to pass session_id through ElevenLabs
+- ✅ Simpler ElevenLabs configuration
+- ✅ Guest can resume on another device with same phone
+- ✅ Can track user history across sessions
+- ✅ One identifier for everything
+
+**How Uniqueness is Ensured:**
+- Phone number + timestamp in milliseconds = unique identifier
+- Example: `+919876543210_1699478912345`
+- Multiple searches by same guest = different timestamps
+- No collision possible
 
 ---
 
@@ -57,10 +84,11 @@ Use **Supabase Real-Time** as a messaging bus to push results from FastAPI to Ne
 #### **Backend Requirements:** ✅ ALREADY DONE
 - [x] FastAPI with Supabase integration
 - [x] Event discovery endpoint (`/api/event/by-interests`)
-- [x] Support for `session_id` query parameter
+- [x] Phone number in request body
+- [x] Generate timestamp internally
 - [x] Write results to `kiosk_results` table
 - [x] Hotel management system
-- [x] Hotel services integration
+- [x] International phone validation
 
 #### **Database Requirements:** ⏳ YOUR TASK
 - [ ] Create `kiosk_results` table in Supabase
@@ -71,12 +99,18 @@ Use **Supabase Real-Time** as a messaging bus to push results from FastAPI to Ne
 ```sql
 CREATE TABLE kiosk_results (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    session_id TEXT NOT NULL,
+    phone_number TEXT NOT NULL,
+    timestamp_millis BIGINT NOT NULL,
+    unique_id TEXT GENERATED ALWAYS AS (phone_number || '_' || timestamp_millis::text) STORED,
     results JSONB NOT NULL,
+    hotel_id TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
-CREATE INDEX idx_kiosk_results_session ON kiosk_results(session_id);
+-- Indexes
+CREATE UNIQUE INDEX idx_kiosk_results_unique ON kiosk_results(phone_number, timestamp_millis);
+CREATE INDEX idx_kiosk_results_phone ON kiosk_results(phone_number);
+CREATE INDEX idx_kiosk_results_created ON kiosk_results(created_at DESC);
 
 -- CRITICAL: Enable real-time
 ALTER TABLE kiosk_results REPLICA IDENTITY FULL;
@@ -87,13 +121,13 @@ ALTER TABLE kiosk_results REPLICA IDENTITY FULL;
 - [ ] Install `@supabase/supabase-js` package
 - [ ] Supabase credentials (URL + anon key)
 - [ ] ElevenLabs SDK integration (already exists)
-- [ ] Implement session management
+- [ ] Phone number input field
 - [ ] Implement real-time subscription
 
 #### **ElevenLabs Configuration:** ⏳ YOUR TASK
-- [ ] Define custom variables (session_id, hotel_id)
-- [ ] Configure webhook URL with variables
-- [ ] Update agent to use variables
+- [ ] Define custom variables (hotel_id, api_url)
+- [ ] Configure webhook URL
+- [ ] Update agent to extract phone from conversation
 - [ ] Test webhook calls
 
 ---
@@ -106,59 +140,97 @@ Let's walk through a **real example** step-by-step:
 
 ---
 
-#### **STEP 1: Kiosk Initialization** (Next.js)
+#### **STEP 1: Guest Provides Phone Number** (Next.js)
 
 ```typescript
-// When kiosk page loads
-const sessionId = crypto.randomUUID();
-// Result: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+// Guest enters phone number at kiosk
+const [phoneNumber, setPhoneNumber] = useState('');
 
-// Subscribe to Supabase real-time
-supabase.channel(`session:${sessionId}`)
-  .on('postgres_changes', {
-    filter: `session_id=eq.${sessionId}`
-  }, (payload) => {
-    // This will be called when results arrive
-    setEvents(payload.new.results.events);
-  })
-  .subscribe();
+// Input field
+<input 
+  type="tel"
+  value={phoneNumber}
+  onChange={(e) => setPhoneNumber(e.target.value)}
+  placeholder="+919876543210"
+/>
 
-// Status: Waiting for results...
+// After entering: phoneNumber = "+919876543210"
 ```
 
 **What's happening:**
-- Unique session ID generated (like a "mailbox address")
-- Kiosk subscribes to its own "mailbox" in Supabase
-- Ready to receive results
+- Guest enters phone number for WhatsApp sharing
+- Next.js stores it in state
+- Will use this to subscribe to real-time results
 
 ---
 
-#### **STEP 2: Guest Interaction Starts** (Next.js → ElevenLabs)
+#### **STEP 2: Subscribe to Real-Time** (Next.js)
+
+```typescript
+// Subscribe to Supabase for this phone number
+useEffect(() => {
+  if (!phoneNumber) return;  // Wait for phone number
+  
+  const channel = supabase
+    .channel(`phone:${phoneNumber}`)
+    .on('postgres_changes', {
+      event: 'INSERT',
+      schema: 'public',
+      table: 'kiosk_results',
+      filter: `phone_number=eq.${phoneNumber}`  // ⭐ Filter by phone!
+    }, (payload) => {
+      console.log('✅ Results received!');
+      setEvents(payload.new.results.events);
+      setIsListening(false);
+    })
+    .subscribe();
+  
+  return () => supabase.removeChannel(channel);
+}, [phoneNumber]);
+
+// Status: Subscribed to +919876543210
+```
+
+**What's happening:**
+- Next.js subscribes to Supabase real-time
+- Filter: Only show results for THIS phone number
+- Ready to receive results for this guest
+
+---
+
+#### **STEP 3: Start Voice Conversation** (Next.js → ElevenLabs)
 
 ```typescript
 // Guest taps "Speak" button
-startConversation();
-
-// Code inside:
-await elevenlabs.startConversation({
-  agentId: 'your-agent-id',
-  variables: {
-    session_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479",  // ⭐ Passed here!
-    hotel_id: "marriott-bangalore",
-    api_url: "https://fastapi-project-tau.vercel.app"
+const startConversation = async () => {
+  if (!phoneNumber) {
+    alert('Please enter your phone number first');
+    return;
   }
-});
+  
+  setIsListening(true);
+  
+  // Start ElevenLabs - MUCH SIMPLER NOW!
+  await window.elevenlabs.startConversation({
+    agentId: process.env.NEXT_PUBLIC_ELEVENLABS_AGENT_ID,
+    variables: {
+      phone_number: phoneNumber,      // ⭐ Just pass phone number
+      hotel_id: params.hotelId,
+      api_url: process.env.NEXT_PUBLIC_API_URL
+    }
+  });
+};
 ```
 
 **What's happening:**
-- Guest clicks button
-- Next.js starts ElevenLabs conversation
-- **Passes session_id as a variable** (like giving ElevenLabs a "delivery address")
-- ElevenLabs stores these variables for the conversation
+- Guest clicks speak button
+- Phone number validation
+- Pass phone_number to ElevenLabs (simpler than session_id!)
+- ElevenLabs starts listening
 
 ---
 
-#### **STEP 3: Voice Conversation** (Guest ↔ ElevenLabs)
+#### **STEP 4: Voice Conversation** (Guest ↔ ElevenLabs)
 
 ```
 ElevenLabs Agent: "Hello! What would you like to do today?"
@@ -170,102 +242,100 @@ ElevenLabs Agent: "Great! Let me find comedy shows for you..."
 - ElevenLabs listens to guest's voice
 - Converts speech to text: "comedy shows"
 - Extracts interests: `extracted_interests = "comedy shows"`
+- Has phone_number from variables
 - Prepares to call webhook
 
 ---
 
-#### **STEP 4: Webhook Call** (ElevenLabs → FastAPI)
+#### **STEP 5: Webhook Call** (ElevenLabs → FastAPI)
 
 ```
-ElevenLabs builds webhook URL using stored variables:
+ElevenLabs calls webhook:
 
-Template: 
-{{api_url}}/api/event/by-interests?session_id={{session_id}}
+POST https://fastapi-project-tau.vercel.app/api/event/by-interests
 
-Replaces variables:
-https://fastapi-project-tau.vercel.app/api/event/by-interests?session_id=f47ac10b-58cc-4372-a567-0e02b2c3d479
-
-Makes HTTP POST:
-POST https://fastapi-project-tau.vercel.app/api/event/by-interests?session_id=f47ac10b-58cc-4372-a567-0e02b2c3d479
+Headers:
+  Content-Type: application/json
 
 Body:
 {
   "interests": "comedy shows",
+  "phone_number": "+919876543210",  ⭐ From variables
   "hotel_id": "marriott-bangalore"
 }
 ```
 
 **What's happening:**
-- ElevenLabs uses the variables to build the URL
-- Session ID included as query parameter
-- Calls FastAPI with guest's interests
+- ElevenLabs uses stored variables to build request
+- Phone number included in request body
+- No session_id needed! Simpler!
+- Calls FastAPI
 
 ---
 
-#### **STEP 5: Event Processing** (FastAPI)
+#### **STEP 6: Event Processing** (FastAPI)
 
 ```python
 # FastAPI receives request
-def get_event_by_interests(
-    request: InterestsRequest,  # interests="comedy shows"
-    session_id: str = "f47ac10b-58cc-4372-a567-0e02b2c3d479"  # From query param
-):
-    # 1. Map "comedy shows" → ["comedy"] category
+def get_event_by_interests(request: InterestsRequest):
+    # Extract from request body
+    phone_number = request.phone_number  # "+919876543210"
+    interests = request.interests        # "comedy shows"
+    hotel_id = request.hotel_id         # "marriott-bangalore"
+    
+    # 1. Map interests to categories
     categories = ["comedy"]
     
-    # 2. Query events from database
-    events = supabase.table('events').select("*").eq('category', 'comedy').execute()
+    # 2. Query events
+    events = query_events(categories)
     
-    # 3. Get hotel services (spa, restaurant, bar)
-    hotel_services = get_hotel_services_as_events(hotel_id, categories)
+    # 3. Get hotel services
+    hotel_services = get_hotel_services(hotel_id, categories)
     
-    # 4. Combine and sort (hotel services first, then by distance)
-    all_results = hotel_services + nearby_events
+    # 4. Generate AI descriptions
+    results = generate_descriptions(events)
     
-    # 5. Generate AI descriptions
-    for event in all_results:
-        description = llm.generate(event)
+    # 5. ⭐ Generate unique timestamp
+    timestamp_millis = int(time.time() * 1000)
+    # Result: 1699478912345 (milliseconds since epoch)
     
-    # 6. Prepare response
-    response = {
-        "success": true,
-        "events": all_results,
-        "hotel_services_count": 2,
-        ...
-    }
-    
-    # 7. ⭐ Write to kiosk_results table with session_id
+    # 6. ⭐ Write to kiosk_results with phone + timestamp
     supabase.table('kiosk_results').insert({
-        "session_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-        "results": response
+        "phone_number": "+919876543210",
+        "timestamp_millis": 1699478912345,
+        "results": {...},
+        "hotel_id": "marriott-bangalore"
     }).execute()
     
-    # 8. Return to ElevenLabs
-    return response
+    # Unique ID auto-generated: "+919876543210_1699478912345"
+    
+    # 7. Return to ElevenLabs
+    return results
 ```
 
 **What's happening:**
 - FastAPI processes the search
-- Finds comedy events
-- Gets hotel comedy services (if any)
-- Generates conversational descriptions
-- **Writes results to Supabase with session_id** ← Critical!
+- Generates current timestamp in milliseconds
+- Writes to Supabase with phone_number + timestamp
+- Database auto-generates unique_id
 - Returns results to ElevenLabs
 
 ---
 
-#### **STEP 6: Database Broadcast** (Supabase)
+#### **STEP 7: Database Broadcast** (Supabase)
 
 ```
 Supabase detects:
   New INSERT on kiosk_results table
-  session_id = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+  phone_number = "+919876543210"
+  timestamp_millis = 1699478912345
 
 Supabase real-time broadcasts:
   Event: INSERT
   Table: kiosk_results
   Data: {
-    session_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+    phone_number: "+919876543210",
+    timestamp_millis: 1699478912345,
     results: { events: [...] }
   }
 
@@ -278,27 +348,20 @@ Latency: 50-150ms ⚡
 - Supabase detects new row inserted
 - Broadcasts INSERT event to all connected clients
 - Next.js subscription receives the broadcast
-- Only shows it if session_id matches
+- Only shows it if phone_number matches
 
 ---
 
-#### **STEP 7: Results Received** (Next.js)
+#### **STEP 8: Results Received** (Next.js)
 
 ```typescript
 // Subscription receives broadcast
 .on('postgres_changes', {
-  filter: `session_id=eq.${sessionId}`  // Filter matches!
+  filter: `phone_number=eq.${phoneNumber}`  // Filter matches!
 }, (payload) => {
   console.log('✅ Results received!');
   
   const results = payload.new.results;
-  // results = {
-  //   events: [
-  //     { name: "Comedy Night", distance_km: 2.3, ... },
-  //     { name: "Standup Show", distance_km: 5.1, ... }
-  //   ]
-  // }
-  
   setEvents(results.events);  // Update React state
   
   // React re-renders → Cards appear on screen! 🎉
@@ -307,14 +370,14 @@ Latency: 50-150ms ⚡
 
 **What's happening:**
 - Next.js subscription receives the broadcast
-- Checks filter: session_id matches ✅
+- Checks filter: phone_number matches ✅
 - Extracts events from results
 - Updates React state
 - UI re-renders with event cards
 
 ---
 
-#### **STEP 8: Synchronized Experience** (Guest View)
+#### **STEP 9: Synchronized Experience** (Guest View)
 
 ```
 Guest Experience:
@@ -328,14 +391,14 @@ First, there's a standup comedy night at BFlat Bar..."
 │ 🎭 Comedy Night at BFlat    │
 │ Tonight at 8 PM | ₹500      │
 │ 📍 2.3km away               │
-│ [📱 Send to Phone]          │
+│ [📱 Send to WhatsApp]       │
 └─────────────────────────────┘
 
 ┌─────────────────────────────┐
 │ 🏨 Alto Vino Bar (Hotel)   │
 │ Happy Hour Comedy | ₹800    │
 │ 📍 Here at the hotel        │
-│ [📱 Send to Phone]          │
+│ [📱 Send to WhatsApp]       │
 └─────────────────────────────┘
 
 Results appear WHILE agent is speaking! ✅
@@ -346,11 +409,20 @@ Perfect synchronization! ✅
 - Voice and visual perfectly synchronized
 - Guest can read while listening
 - Hotel services prominently displayed
-- Distance information helps decision-making
+- Phone number already entered for easy WhatsApp share
 
 ---
 
 ## 🎯 **Why This Architecture?**
+
+### **Advantages of Phone Number Approach:**
+
+✅ **Simpler ElevenLabs Config** - No session_id to pass through  
+✅ **One Identifier** - Phone number used for everything  
+✅ **Natural Flow** - Already collecting phone for WhatsApp  
+✅ **Multi-Device** - Guest can continue on another kiosk  
+✅ **User Tracking** - Link searches to same guest  
+✅ **No Extra Variables** - Just phone_number, hotel_id  
 
 ### **Challenges We Solved:**
 
@@ -358,13 +430,13 @@ Perfect synchronization! ✅
 - ❌ Can't directly return results to browser
 - ✅ Solution: Write to database, broadcast via real-time
 
-**Challenge 2:** Multiple concurrent kiosks
-- ❌ How to avoid showing Kiosk A's results on Kiosk B?
-- ✅ Solution: Unique session_id per kiosk, filtered subscriptions
+**Challenge 2:** Multiple concurrent guests
+- ❌ How to avoid showing Guest A's results to Guest B?
+- ✅ Solution: Each guest has unique phone number, filtered subscriptions
 
-**Challenge 3:** Real-time updates
-- ❌ Polling is slow and wastes resources
-- ✅ Solution: Supabase real-time WebSocket (push-based)
+**Challenge 3:** Multiple searches by same guest
+- ❌ How to distinguish search 1 vs search 2?
+- ✅ Solution: Add timestamp in milliseconds (unique per search)
 
 **Challenge 4:** Cost and complexity
 - ❌ Redis/WebSocket servers add cost and infrastructure
@@ -377,231 +449,37 @@ Perfect synchronization! ✅
 ```
 Component          Action                              Data
 ─────────────────────────────────────────────────────────────
-Next.js         → Generate session_id               → "abc-123"
+Next.js         → Collect phone number             → "+919876543210"
                   ↓
-Next.js         → Pass to ElevenLabs                → variables: {session_id: "abc-123"}
+Next.js         → Subscribe to Supabase            → filter: phone_number=eq.+919876543210
                   ↓
-ElevenLabs      → Store variable                    → conversation.session_id = "abc-123"
+Next.js         → Pass to ElevenLabs               → variables: {phone_number: "+91..."}
                   ↓
-Guest           → Speaks                            → "comedy shows"
+ElevenLabs      → Store variable                   → conversation.phone_number = "+91..."
                   ↓
-ElevenLabs      → Extract interests                 → interests = "comedy shows"
+Guest           → Speaks                           → "comedy shows"
                   ↓
-ElevenLabs      → Build webhook URL                 → ?session_id=abc-123
+ElevenLabs      → Extract interests                → interests = "comedy shows"
                   ↓
-ElevenLabs      → Call FastAPI                      → POST with session_id
+ElevenLabs      → Call FastAPI                     → POST with phone_number in body
                   ↓
-FastAPI         → Process search                    → Find events
+FastAPI         → Generate timestamp               → timestamp = 1699478912345
                   ↓
-FastAPI         → Write to Supabase                 → INSERT (session_id, results)
+FastAPI         → Process search                   → Find events
                   ↓
-Supabase        → Broadcast INSERT                  → Real-time WebSocket
+FastAPI         → Write to Supabase                → INSERT (phone, timestamp, results)
                   ↓
-Next.js         → Receive (if filter matches)       → session_id=eq.abc-123 ✅
+Supabase        → Broadcast INSERT                 → Real-time WebSocket
                   ↓
-Next.js         → Update UI                         → setEvents(...)
+Next.js         → Receive (if filter matches)      → phone_number=eq.+919876543210 ✅
                   ↓
-Screen          → Display cards                     → Guest sees results! 🎉
+Next.js         → Update UI                        → setEvents(...)
+                  ↓
+Screen          → Display cards                    → Guest sees results! 🎉
 
 Total Time: ~2-3 seconds (mostly LLM processing)
 Real-time broadcast: 50-150ms ⚡
 ```
-
----
-
-## 🎯 **Key Benefits**
-
-### **For Guests:**
-✅ Voice + Visual synchronized experience  
-✅ Can read details while listening  
-✅ Quick response time (< 3 seconds)  
-✅ Clear, organized display  
-✅ Hotel services highlighted  
-
-### **For Hotels:**
-✅ Modern, tech-forward image  
-✅ Upsell services naturally  
-✅ Reduced concierge desk load  
-✅ Better guest satisfaction  
-✅ Trackable engagement metrics  
-
-### **For Developers:**
-✅ Zero-cost solution (no Redis)  
-✅ Simple architecture  
-✅ Easy to debug  
-✅ Scales to 100+ kiosks  
-✅ Production-ready  
-
----
-
-## 🏗️ **System Requirements**
-
-### **1. Supabase Account** ✅
-- Project URL: `https://wopjezlgtborpnhcfvoc.supabase.co`
-- Anon key: Available in dashboard
-- Real-time enabled: Free tier includes it
-- **Status:** Already have it!
-
-### **2. FastAPI Backend** ✅
-- Deployed to: Vercel (https://fastapi-project-tau.vercel.app)
-- Modified endpoint with session_id support
-- **Status:** Already implemented!
-
-### **3. Next.js Frontend** ⏳
-- React 18+ with hooks support
-- Client-side components ('use client')
-- Environment variables support
-- **Status:** Needs integration code
-
-### **4. ElevenLabs Agent** ⏳
-- Agent created and configured
-- Conversational AI enabled
-- Webhook support
-- Custom variables support
-- **Status:** Needs configuration
-
-### **5. Network Requirements**
-- Stable internet connection for kiosk
-- WebSocket support (for real-time)
-- HTTPS for secure connections
-- **Status:** Standard requirements
-
----
-
-## 🔍 **Technical Architecture**
-
-### **Components:**
-
-**1. Next.js Kiosk (Frontend)**
-- **Role:** Display UI, manage session, show results
-- **Technology:** React, TypeScript, Supabase client
-- **Responsibilities:**
-  - Generate unique session_id
-  - Subscribe to Supabase real-time
-  - Pass session_id to ElevenLabs
-  - Display event cards
-  - Handle user interactions
-
-**2. ElevenLabs Agent (Voice Layer)**
-- **Role:** Voice conversation, interest extraction
-- **Technology:** ElevenLabs Conversational AI
-- **Responsibilities:**
-  - Listen to guest speech
-  - Extract interests from conversation
-  - Store session variables
-  - Call FastAPI webhook
-  - Speak results to guest
-
-**3. FastAPI Backend (Processing)**
-- **Role:** Event search, AI processing, data management
-- **Technology:** Python, FastAPI, LangChain
-- **Responsibilities:**
-  - Map interests to categories
-  - Query events from database
-  - Get hotel services
-  - Generate AI descriptions
-  - Write results to Supabase
-
-**4. Supabase (Data & Messaging)**
-- **Role:** Database + Real-time messaging bus
-- **Technology:** PostgreSQL + Real-time WebSocket
-- **Responsibilities:**
-  - Store events, hotels, services
-  - Store temporary results
-  - Broadcast INSERT events
-  - Manage subscriptions
-
----
-
-## 📈 **Workflow Timing Breakdown**
-
-```
-Action                          Component       Time
-──────────────────────────────────────────────────────────
-Generate session_id            Next.js         < 1ms
-Subscribe to real-time         Next.js         50-100ms
-Pass to ElevenLabs            Next.js         < 1ms
-Guest speaks                   Guest           2-5s
-Speech recognition             ElevenLabs      200-500ms
-Extract interests              ElevenLabs      100-300ms
-Call webhook                   ElevenLabs      100-200ms
-Map interests to categories    FastAPI         500-1000ms (LLM)
-Query events                   FastAPI         50-100ms
-Get hotel services             FastAPI         50-100ms
-Generate descriptions          FastAPI         1000-2000ms (LLM)
-Write to kiosk_results        FastAPI         50-100ms
-Broadcast to subscribers       Supabase        50-150ms ⚡
-Receive in Next.js            Next.js         < 10ms
-Update React state            Next.js         < 10ms
-Render cards                   Next.js         < 50ms
-──────────────────────────────────────────────────────────
-TOTAL (after guest speaks):                    ~2-4 seconds
-Real-time broadcast:                           50-150ms ⚡
-```
-
-**Key insight:** Most time is LLM processing. The real-time part is **instant!**
-
----
-
-## 🎯 **Why Session ID is Critical**
-
-### **Without session_id:**
-```
-Problem:
-- Kiosk 1 guest searches "comedy"
-- Kiosk 2 guest searches "spa"
-- Both kiosks receive BOTH results ❌
-- Kiosk 1 shows spa results (wrong!)
-- Kiosk 2 shows comedy results (wrong!)
-- Complete chaos! 🔥
-```
-
-### **With session_id:**
-```
-Solution:
-- Kiosk 1: session_id = "aaa-111", searches "comedy"
-  → Results written with session_id="aaa-111"
-  → Only Kiosk 1 receives (filter matches) ✅
-  
-- Kiosk 2: session_id = "bbb-222", searches "spa"
-  → Results written with session_id="bbb-222"
-  → Only Kiosk 2 receives (filter matches) ✅
-
-Perfect isolation! Each kiosk independent! 🎯
-```
-
----
-
-## 💡 **Design Decisions Explained**
-
-### **Why Supabase Real-Time?**
-- ✅ Already using Supabase for data
-- ✅ Zero additional cost
-- ✅ No extra infrastructure
-- ✅ Built-in WebSocket
-- ✅ Automatic reconnection
-- ✅ Free tier sufficient for 100 kiosks
-
-### **Why Not Polling?**
-- ❌ Slow (500-1000ms delay)
-- ❌ High server load
-- ❌ Battery drain on tablets
-- ❌ Wastes bandwidth
-- ❌ Poor user experience
-
-### **Why Not WebSocket Server?**
-- ❌ Extra $5/month cost
-- ❌ Additional infrastructure to manage
-- ❌ Deployment complexity
-- ❌ Overkill for MVP
-- ✅ Good for scale later (100+ kiosks)
-
-### **Why session_id as Query Parameter?**
-- ✅ Easy to pass from ElevenLabs
-- ✅ Visible in logs (debugging)
-- ✅ No body parsing needed
-- ✅ Standard HTTP practice
-- ✅ Works with ElevenLabs webhook system
 
 ---
 
@@ -641,7 +519,7 @@ export const supabase = createClient(
 
 ---
 
-### **4. Copy This Complete Kiosk Component** (2 minutes)
+### **4. Complete Kiosk Component** (3 minutes)
 
 ```typescript
 // app/kiosk/[hotelId]/page.tsx
@@ -651,412 +529,49 @@ import { useState, useEffect } from 'react';
 import { supabase } from '@/lib/supabase';
 
 export default function KioskPage({ params }: { params: { hotelId: string } }) {
-  // Session ID - unique per kiosk session
-  const [sessionId] = useState(() => crypto.randomUUID());
-  
   // State
+  const [phoneNumber, setPhoneNumber] = useState('');
   const [events, setEvents] = useState<any[]>([]);
   const [isListening, setIsListening] = useState(false);
+  const [phoneEntered, setPhoneEntered] = useState(false);
 
-  // ⭐ CRITICAL: Subscribe to real-time updates
+  // ⭐ Subscribe to real-time results for this phone number
   useEffect(() => {
-    const channel = supabase
-      .channel(`session:${sessionId}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'kiosk_results',
-          filter: `session_id=eq.${sessionId}`,
-        },
-        (payload) => {
-          console.log('✅ Results received!', payload);
-          const results = payload.new.results;
-          setEvents(results.events || []);
-          setIsListening(false);
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [sessionId]);
-
-  // Start ElevenLabs conversation
-  const startConversation = async () => {
-    setIsListening(true);
-    setEvents([]);
-
-    // Start ElevenLabs with session_id
-    // @ts-ignore
-    await window.elevenlabs?.startConversation({
-      agentId: process.env.NEXT_PUBLIC_ELEVENLABS_AGENT_ID,
-      variables: {
-        session_id: sessionId,
-        hotel_id: params.hotelId,
-        api_url: process.env.NEXT_PUBLIC_API_URL
-      }
-    });
-  };
-
-  return (
-    <div className="min-h-screen bg-gray-50 p-8">
-      {/* Voice Button */}
-      <div className="text-center mb-8">
-        <button
-          onClick={startConversation}
-          disabled={isListening}
-          className={`
-            px-12 py-6 rounded-full text-2xl font-bold
-            ${isListening 
-              ? 'bg-red-500 animate-pulse' 
-              : 'bg-blue-600 hover:bg-blue-700'
-            }
-            text-white shadow-lg transition-all
-          `}
-        >
-          {isListening ? '🎤 Listening...' : '🗣️ Tap to Speak'}
-        </button>
-      </div>
-
-      {/* Events Grid */}
-      {events.length > 0 && (
-        <div className="max-w-6xl mx-auto">
-          <h2 className="text-2xl font-bold mb-6">
-            Found {events.length} results:
-          </h2>
-          
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {events.map((event: any, i: number) => (
-              <div key={i} className="bg-white rounded-lg shadow-lg p-6">
-                {/* Hotel Service Badge */}
-                {event.event_details.is_hotel_service && (
-                  <span className="bg-blue-100 text-blue-800 text-xs font-bold px-2 py-1 rounded">
-                    🏨 Hotel Service
-                  </span>
-                )}
-                
-                {/* Distance */}
-                {event.event_details.distance_km !== undefined && (
-                  <span className="bg-green-100 text-green-800 text-xs font-bold px-2 py-1 rounded ml-2">
-                    {event.event_details.distance_km === 0 
-                      ? '📍 Here' 
-                      : `📍 ${event.event_details.distance_km}km`
-                    }
-                  </span>
-                )}
-
-                <h3 className="text-xl font-bold mt-3">
-                  {event.event_details.name}
-                </h3>
-                
-                <p className="text-gray-700 my-3">
-                  {event.suggestion}
-                </p>
-
-                <div className="text-sm text-gray-600 space-y-1">
-                  <p>📍 {event.event_details.location}</p>
-                  <p>📅 {event.event_details.date}</p>
-                  <p>🕐 {event.event_details.time}</p>
-                  <p className="font-bold">💰 {event.event_details.price}</p>
-                </div>
-
-                <button className="mt-4 w-full bg-green-600 text-white py-2 rounded hover:bg-green-700">
-                  📱 Send to Phone
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Debug Panel (remove in production) */}
-      <div className="fixed bottom-4 right-4 bg-gray-800 text-white p-4 rounded text-xs">
-        <p>Session: {sessionId.slice(0, 8)}...</p>
-        <p>Hotel: {params.hotelId}</p>
-        <p>Events: {events.length}</p>
-      </div>
-    </div>
-  );
-}
-```
-
----
-
-### **5. Configure ElevenLabs Agent** (2 minutes)
-
-In ElevenLabs Dashboard:
-
-**Webhook URL:**
-```
-{{api_url}}/api/event/by-interests?session_id={{session_id}}
-```
-
-**Request Body:**
-```json
-{
-  "interests": "{{extracted_interests}}",
-  "hotel_id": "{{hotel_id}}"
-}
-```
-
-**Variables to pass from frontend:**
-- `session_id` - Generated in Next.js
-- `hotel_id` - From URL params
-- `api_url` - Your API URL
-
----
-
-## 🔑 **IMPORTANT: How session_id Flows Through the System**
-
-### **Understanding the Architecture**
-
-**Question:** *"How does ElevenLabs know the session_id? It's generated in Next.js!"*
-
-**Answer:** You **pass it to ElevenLabs** when starting the conversation!
-
----
-
-### **The Complete Flow:**
-
-```
-┌─────────────────────────────────────────────────────────┐
-│  STEP 1: Next.js Generates session_id                   │
-│  const sessionId = crypto.randomUUID()                  │
-│  → Result: "f47ac10b-58cc-4372-a567-0e02b2c3d479"       │
-└──────────────────────┬──────────────────────────────────┘
-                       │
-                       │ Pass to ElevenLabs via "variables"
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────┐
-│  STEP 2: Next.js Starts ElevenLabs Conversation         │
-│                                                          │
-│  elevenlabs.startConversation({                         │
-│    agentId: 'agent-123',                                │
-│    variables: {                                         │
-│      session_id: "f47ac10b-58cc...",  ← Passed here!   │
-│      hotel_id: "marriott-bangalore",                    │
-│      api_url: "https://fastapi-project-tau.vercel.app"  │
-│    }                                                    │
-│  })                                                     │
-└──────────────────────┬──────────────────────────────────┘
-                       │
-                       │ ElevenLabs stores these variables
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────┐
-│  STEP 3: ElevenLabs Stores Variables                    │
-│                                                          │
-│  Conversation Context:                                  │
-│  {                                                      │
-│    conversationId: "elevenlabs-conv-789",               │
-│    variables: {                                         │
-│      session_id: "f47ac10b-58cc...",  ← Stored!        │
-│      hotel_id: "marriott-bangalore",                    │
-│      api_url: "https://fastapi..."                      │
-│    }                                                    │
-│  }                                                      │
-└──────────────────────┬──────────────────────────────────┘
-                       │
-                       │ Guest speaks
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────┐
-│  STEP 4: Guest Interaction                              │
-│                                                          │
-│  Guest: "I want comedy shows tonight"                   │
-│                                                          │
-│  Agent extracts: interests = "comedy shows"             │
-└──────────────────────┬──────────────────────────────────┘
-                       │
-                       │ Build webhook call using variables
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────┐
-│  STEP 5: ElevenLabs Builds Webhook URL                  │
-│                                                          │
-│  Template:                                              │
-│  {{api_url}}/api/event/by-interests?                    │
-│  session_id={{session_id}}                              │
-│                                                          │
-│  Replace variables:                                     │
-│  {{api_url}} → "https://fastapi-project-tau.vercel.app" │
-│  {{session_id}} → "f47ac10b-58cc..."                    │
-│                                                          │
-│  Final URL:                                             │
-│  https://fastapi-project-tau.vercel.app/                │
-│  api/event/by-interests?session_id=f47ac10b-58cc...     │
-└──────────────────────┬──────────────────────────────────┘
-                       │
-                       │ Make HTTP POST request
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────┐
-│  STEP 6: FastAPI Receives Request                       │
-│                                                          │
-│  Query Params:                                          │
-│  - session_id = "f47ac10b-58cc..."  ← Got it!          │
-│                                                          │
-│  Body:                                                  │
-│  {                                                      │
-│    "interests": "comedy shows",                         │
-│    "hotel_id": "marriott-bangalore"                     │
-│  }                                                      │
-│                                                          │
-│  Process:                                               │
-│  1. Find comedy events                                  │
-│  2. Get hotel services                                  │
-│  3. Generate results                                    │
-│  4. Write to Supabase:                                  │
-│     INSERT INTO kiosk_results                           │
-│     (session_id, results)                               │
-│     VALUES ('f47ac10b-58cc...', {...})                  │
-└──────────────────────┬──────────────────────────────────┘
-                       │
-                       │ Supabase broadcasts INSERT
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────┐
-│  STEP 7: Supabase Real-Time Broadcast                   │
-│                                                          │
-│  Event: INSERT on kiosk_results                         │
-│  Data: session_id = "f47ac10b-58cc..."                  │
-│                                                          │
-│  Broadcast to all subscribers ──────────────┐           │
-└─────────────────────────────────────────────┼───────────┘
-                                              │
-                                              │ WebSocket push
-                                              │
-                                              ▼
-┌─────────────────────────────────────────────────────────┐
-│  STEP 8: Next.js Receives Update                        │
-│                                                          │
-│  Subscription filter: session_id=eq.f47ac10b-58cc...    │
-│  ✅ Match! This is for our session!                     │
-│                                                          │
-│  setEvents(payload.new.results.events)                  │
-│  → Event cards appear on screen! 🎉                     │
-│                                                          │
-│  Time elapsed: ~50-150ms (real-time!)                   │
-└─────────────────────────────────────────────────────────┘
-```
-
----
-
-### **Key Points:**
-
-1. **Next.js owns the session_id**
-   - Generated once per kiosk session
-   - Passed to ElevenLabs when starting conversation
-
-2. **ElevenLabs acts as a carrier**
-   - Receives session_id from Next.js
-   - Stores it as a "conversation variable"
-   - Passes it to FastAPI in webhook URL
-
-3. **FastAPI uses it to write results**
-   - Receives session_id as query parameter
-   - Writes to database with that session_id
-   - Supabase broadcasts to correct subscriber
-
-4. **Next.js receives results**
-   - Subscription filters by session_id
-   - Only receives results for its own session
-   - Updates UI in real-time
-
----
-
-### **Why This Works:**
-
-✅ **Unique per kiosk** - Each tablet has its own session  
-✅ **No conflicts** - Multiple kiosks work independently  
-✅ **Real-time** - Results appear as they're generated  
-✅ **Secure** - Each session only sees its own results  
-✅ **Simple** - Just one variable to pass!  
-
----
-
-### **Example with Multiple Kiosks:**
-
-```
-Kiosk 1 (Lobby):
-  session_id: "aaa-111"
-  Guest searches: "comedy"
-  → Results written with session_id="aaa-111"
-  → Only Kiosk 1 receives these results ✅
-
-Kiosk 2 (Floor 3):
-  session_id: "bbb-222"
-  Guest searches: "spa"
-  → Results written with session_id="bbb-222"
-  → Only Kiosk 2 receives these results ✅
-
-No interference! Each kiosk independent! 🎯
-```
-
----
-
-## 💻 **Practical Code Example**
-
-### **Complete Working Example:**
-
-```typescript
-// app/kiosk/[hotelId]/page.tsx
-'use client';
-
-import { useState, useEffect } from 'react';
-import { supabase } from '@/lib/supabase';
-
-export default function KioskPage({ params }: { params: { hotelId: string } }) {
-  // ⭐ STEP 1: Generate unique session_id
-  const [sessionId] = useState(() => {
-    const id = crypto.randomUUID();
-    console.log('🎯 Session created:', id);
-    return id;
-  });
-  
-  const [events, setEvents] = useState<any[]>([]);
-  const [isListening, setIsListening] = useState(false);
-
-  // ⭐ STEP 2: Subscribe to Supabase real-time
-  useEffect(() => {
-    console.log('📡 Subscribing to session:', sessionId);
+    if (!phoneNumber || !phoneEntered) return;
+    
+    console.log('📡 Subscribing to phone:', phoneNumber);
     
     const channel = supabase
-      .channel(`session:${sessionId}`)
+      .channel(`phone:${phoneNumber}`)
       .on('postgres_changes', {
         event: 'INSERT',
         schema: 'public',
         table: 'kiosk_results',
-        filter: `session_id=eq.${sessionId}`,
+        filter: `phone_number=eq.${phoneNumber}`,  // ⭐ Filter by phone!
       }, (payload) => {
-        console.log('✅ Results received in real-time!');
-        console.log('📦 Payload:', payload);
+        console.log('✅ Results received!', payload);
         
         const results = payload.new.results;
-        setEvents(results.events || []);
-        setIsListening(false);
+        if (results && results.events) {
+          setEvents(results.events);
+          setIsListening(false);
+        }
       })
       .subscribe((status) => {
         console.log('📡 Subscription status:', status);
       });
 
     return () => {
-      console.log('👋 Unsubscribing from session');
       supabase.removeChannel(channel);
     };
-  }, [sessionId]);
+  }, [phoneNumber, phoneEntered]);
 
-  // ⭐ STEP 3: Start conversation and PASS session_id to ElevenLabs
+  // Start voice conversation
   const startConversation = async () => {
-    console.log('🎤 Starting conversation...');
-    console.log('📤 Passing to ElevenLabs:', {
-      session_id: sessionId,
-      hotel_id: params.hotelId
-    });
+    if (!phoneNumber) {
+      alert('Please enter your phone number first');
+      return;
+    }
     
     setIsListening(true);
     setEvents([]);
@@ -1066,90 +581,219 @@ export default function KioskPage({ params }: { params: { hotelId: string } }) {
       await window.elevenlabs.startConversation({
         agentId: process.env.NEXT_PUBLIC_ELEVENLABS_AGENT_ID,
         
-        // ⭐⭐⭐ THIS IS THE CRITICAL PART! ⭐⭐⭐
-        // These variables are passed to ElevenLabs and used in webhook
+        // ⭐ MUCH SIMPLER - Just pass phone_number!
         variables: {
-          session_id: sessionId,        // ← ElevenLabs will use this in webhook!
-          hotel_id: params.hotelId,     // ← And this!
+          phone_number: phoneNumber,
+          hotel_id: params.hotelId,
           api_url: process.env.NEXT_PUBLIC_API_URL
         }
       });
-      
-      console.log('✅ Conversation started with session_id passed!');
     } catch (error) {
-      console.error('❌ Failed to start conversation:', error);
+      console.error('Failed to start conversation:', error);
       setIsListening(false);
     }
   };
 
+  // Handle phone number submission
+  const handlePhoneSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    
+    // Basic validation
+    if (!phoneNumber.startsWith('+')) {
+      alert('Phone number must include country code (e.g., +91...)');
+      return;
+    }
+    
+    if (phoneNumber.length < 10) {
+      alert('Please enter a valid phone number');
+      return;
+    }
+    
+    setPhoneEntered(true);
+  };
+
   return (
-    <div className="p-8">
-      {/* Debug Info - shows flow is working */}
-      <div className="mb-4 p-4 bg-gray-100 rounded">
-        <p className="text-sm"><strong>Session ID:</strong> {sessionId}</p>
-        <p className="text-sm"><strong>Hotel ID:</strong> {params.hotelId}</p>
-        <p className="text-sm"><strong>Status:</strong> {isListening ? '🎤 Listening' : '✅ Ready'}</p>
-        <p className="text-sm"><strong>Events:</strong> {events.length}</p>
+    <div className="min-h-screen bg-gray-50 p-8">
+      {/* Header */}
+      <div className="max-w-7xl mx-auto mb-8 text-center">
+        <h1 className="text-4xl font-bold mb-2">
+          Welcome to Marriott Bangalore
+        </h1>
+        <p className="text-gray-600">
+          Discover events and activities nearby
+        </p>
       </div>
 
-      <button
-        onClick={startConversation}
-        className="px-8 py-4 bg-blue-600 text-white rounded-lg"
-      >
-        {isListening ? '🎤 Listening...' : '🗣️ Tap to Speak'}
-      </button>
-
-      {/* Results */}
-      <div className="mt-8 grid gap-4">
-        {events.map((event, i) => (
-          <div key={i} className="p-4 bg-white rounded shadow">
-            <h3 className="font-bold">{event.event_details.name}</h3>
-            <p>{event.suggestion}</p>
+      {/* Phone Number Input */}
+      {!phoneEntered ? (
+        <div className="max-w-md mx-auto bg-white rounded-lg shadow-lg p-8">
+          <h2 className="text-2xl font-bold mb-4">Get Started</h2>
+          <p className="text-gray-600 mb-6">
+            Enter your phone number to receive event details on WhatsApp
+          </p>
+          
+          <form onSubmit={handlePhoneSubmit}>
+            <input
+              type="tel"
+              value={phoneNumber}
+              onChange={(e) => setPhoneNumber(e.target.value)}
+              placeholder="+919876543210"
+              className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg text-lg mb-4"
+              required
+            />
+            
+            <button
+              type="submit"
+              className="w-full bg-blue-600 text-white py-3 rounded-lg text-lg font-bold hover:bg-blue-700"
+            >
+              Continue →
+            </button>
+          </form>
+          
+          <p className="text-sm text-gray-500 mt-4">
+            We'll use this to send event details to your WhatsApp
+          </p>
+        </div>
+      ) : (
+        <>
+          {/* Voice Button */}
+          <div className="text-center mb-8">
+            <button
+              onClick={startConversation}
+              disabled={isListening}
+              className={`
+                px-12 py-6 rounded-full text-2xl font-bold
+                ${isListening 
+                  ? 'bg-red-500 animate-pulse cursor-not-allowed' 
+                  : 'bg-blue-600 hover:bg-blue-700 active:scale-95'
+                }
+                text-white transition-all shadow-lg
+              `}
+            >
+              {isListening ? '🎤 Listening...' : '🗣️ Tap to Speak'}
+            </button>
+            
+            {isListening && (
+              <p className="mt-4 text-gray-600 animate-pulse">
+                Searching for events...
+              </p>
+            )}
           </div>
-        ))}
+
+          {/* Debug Info */}
+          <div className="max-w-7xl mx-auto mb-4 p-4 bg-gray-100 rounded text-sm">
+            <p><strong>Phone:</strong> {phoneNumber}</p>
+            <p><strong>Hotel:</strong> {params.hotelId}</p>
+            <p><strong>Status:</strong> {isListening ? 'Listening' : 'Ready'}</p>
+            <p><strong>Events:</strong> {events.length}</p>
+          </div>
+
+          {/* Events Grid */}
+          {events.length > 0 && (
+            <div className="max-w-7xl mx-auto">
+              <h2 className="text-2xl font-bold mb-6">
+                Found {events.length} results for you:
+              </h2>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {events.map((event, index) => (
+                  <EventCard 
+                    key={index} 
+                    event={event}
+                    phoneNumber={phoneNumber}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// Event Card Component
+function EventCard({ event, phoneNumber }: { event: any, phoneNumber: string }) {
+  const { suggestion, event_details } = event;
+
+  const sendToWhatsApp = async () => {
+    // TODO: Implement WhatsApp send
+    alert(`Will send ${event_details.name} to ${phoneNumber}`);
+  };
+
+  return (
+    <div className="bg-white rounded-lg shadow-lg overflow-hidden hover:shadow-xl transition-shadow">
+      {/* Image */}
+      {event_details.image_url && (
+        <img
+          src={event_details.image_url}
+          alt={event_details.name}
+          className="w-full h-48 object-cover"
+        />
+      )}
+
+      {/* Content */}
+      <div className="p-6">
+        {/* Badges */}
+        {event_details.is_hotel_service && (
+          <span className="inline-block px-3 py-1 bg-blue-100 text-blue-800 text-sm font-semibold rounded-full mb-2">
+            🏨 Hotel Service
+          </span>
+        )}
+
+        {event_details.distance_km !== undefined && event_details.distance_km !== null && (
+          <span className="inline-block px-3 py-1 bg-green-100 text-green-800 text-sm font-semibold rounded-full mb-2 ml-2">
+            📍 {event_details.distance_km === 0 ? 'Here' : `${event_details.distance_km}km away`}
+          </span>
+        )}
+
+        {/* Title */}
+        <h3 className="text-xl font-bold text-gray-900 mb-2">
+          {event_details.name}
+        </h3>
+
+        {/* AI Suggestion */}
+        <p className="text-gray-700 mb-4 leading-relaxed">
+          {suggestion}
+        </p>
+
+        {/* Details */}
+        <div className="space-y-2 text-sm text-gray-600 mb-4">
+          <p>📍 {event_details.location}</p>
+          <p>📅 {event_details.date}</p>
+          <p>🕐 {event_details.time}</p>
+          <p className="font-semibold text-gray-900">💰 {event_details.price}</p>
+        </div>
+
+        {/* Actions */}
+        <div className="flex gap-3">
+          {event_details.booking_link && (
+            <a
+              href={event_details.booking_link}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex-1 bg-blue-600 text-white text-center py-2 rounded-lg hover:bg-blue-700 transition"
+            >
+              Book Now
+            </a>
+          )}
+          
+          <button
+            onClick={sendToWhatsApp}
+            className="flex-1 bg-green-600 text-white py-2 rounded-lg hover:bg-green-700 transition"
+          >
+            📱 Send to WhatsApp
+          </button>
+        </div>
       </div>
     </div>
   );
 }
 ```
 
-**What happens when you run this:**
-
-1. Page loads → session_id generated
-2. Supabase subscription starts
-3. Guest clicks button → ElevenLabs starts
-4. **Session_id is passed to ElevenLabs**
-5. Guest speaks → ElevenLabs calls webhook with session_id
-6. FastAPI writes results with that session_id
-7. Supabase broadcasts → Your subscription receives it
-8. Cards appear! ⚡
-
 ---
 
-## 🧪 Testing (2 minutes)
-
-### **Test 1: Backend**
-
-```bash
-curl -X POST "https://your-api.vercel.app/api/event/by-interests?session_id=test-123" \
-  -H "Content-Type: application/json" \
-  -d '{"interests": "comedy", "hotel_id": "marriott-bangalore"}'
-
-# Check Supabase table - should see row with session_id="test-123"
-```
-
-### **Test 2: Frontend**
-
-1. Open kiosk page in browser
-2. Open browser console
-3. Click "Tap to Speak"
-4. Say something
-5. Watch console log: "✅ Results received!"
-6. See cards appear on screen
-
----
-
-## ⚙️ **ElevenLabs Agent Configuration (Detailed)**
+## ⚙️ **ElevenLabs Agent Configuration (SIMPLIFIED!)**
 
 ### **Step-by-Step ElevenLabs Setup:**
 
@@ -1157,13 +801,11 @@ curl -X POST "https://your-api.vercel.app/api/event/by-interests?session_id=test
 
 **2. Add Custom Variables:**
 ```
-In the "Variables" section, click "Add Variable":
-
 Variable 1:
-  Name: session_id
+  Name: phone_number
   Type: string
   Required: Yes
-  Description: Unique session ID from kiosk frontend
+  Description: Guest's phone number from kiosk input
 
 Variable 2:
   Name: hotel_id
@@ -1179,13 +821,13 @@ Variable 3:
   Description: Backend API base URL
 ```
 
-**3. Configure Webhook/Tool:**
+**3. Configure Webhook:**
 ```
 Tool Name: search_events
 Description: Search for events based on guest interests
 
 HTTP Method: POST
-URL: {{api_url}}/api/event/by-interests?session_id={{session_id}}
+URL: {{api_url}}/api/event/by-interests
 
 Headers:
   Content-Type: application/json
@@ -1193,6 +835,7 @@ Headers:
 Request Body:
 {
   "interests": "{{extracted_interests}}",
+  "phone_number": "{{phone_number}}",
   "hotel_id": "{{hotel_id}}"
 }
 
@@ -1205,329 +848,240 @@ Response Handling:
 You are a helpful hotel concierge assistant.
 
 You have access to these variables:
-- session_id: Unique session identifier (automatically passed)
+- phone_number: Guest's phone number (for sending details)
 - hotel_id: Current hotel location
 - api_url: Backend API URL
 
 When a guest tells you what they're interested in:
 1. Extract their interests (e.g., "comedy shows", "spa", "food")
-2. Call the search_events tool with the extracted interests
+2. Call the search_events tool with the extracted interests and phone_number
 3. The tool will return matching events and hotel services
 4. Tell the guest about the results in a friendly, conversational way
 
-Important: The session_id is already configured in the webhook - you don't need to mention it to guests.
+Note: The phone_number is already provided - don't ask the guest for it again.
 ```
 
 **5. Test in ElevenLabs:**
 ```
 In the test panel:
-1. Set test values for variables:
-   - session_id: "test-123"
+1. Set test values:
+   - phone_number: "+919876543210"
    - hotel_id: "marriott-bangalore"
    - api_url: "https://fastapi-project-tau.vercel.app"
 
 2. Type: "I want comedy shows"
 
-3. Check if webhook is called with correct URL:
-   https://fastapi-project-tau.vercel.app/api/event/by-interests?session_id=test-123
+3. Verify webhook is called correctly
 
-4. Verify results are returned
+4. Check response contains events
 ```
 
 ---
 
-## 🎯 **Important Notes for Frontend Team**
+## 🧪 Testing
 
-### **✅ DO:**
-- Generate session_id in Next.js
-- Pass session_id to ElevenLabs in `variables` object
-- Subscribe to Supabase with filter on that session_id
-- Keep session_id unique per kiosk session (use crypto.randomUUID())
+### **Test 1: Backend**
 
-### **❌ DON'T:**
-- Don't try to pass session_id after conversation starts
-- Don't share session_id between multiple kiosks
-- Don't use predictable session_ids (use UUIDs)
-- Don't forget to unsubscribe on component unmount
+```bash
+# Test with phone number
+curl -X POST "https://fastapi-project-tau.vercel.app/api/event/by-interests" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "interests": "comedy",
+    "phone_number": "+919876543210",
+    "hotel_id": "marriott-bangalore"
+  }'
+
+# Check Supabase table - should see row with your phone number
+```
+
+### **Test 2: Frontend Subscription**
+
+```typescript
+// Test in browser console
+const testPhone = '+919876543210';
+
+// Subscribe
+const channel = supabase
+  .channel(`test-${testPhone}`)
+  .on('postgres_changes', {
+    event: 'INSERT',
+    schema: 'public',
+    table: 'kiosk_results',
+    filter: `phone_number=eq.${testPhone}`
+  }, (payload) => {
+    console.log('✅ Received:', payload);
+  })
+  .subscribe();
+
+// Then call API with this phone number
+// You should see the console log!
+```
+
+### **Test 3: End-to-End**
+
+1. Open kiosk page
+2. Enter phone number: +919876543210
+3. Click "Continue"
+4. Click "Tap to Speak"
+5. Say: "I want comedy shows"
+6. Watch results appear in real-time! ⚡
 
 ---
 
-## 🔍 **Debugging Guide**
+## 🔍 **How Phone Number Works**
 
-### **Check 1: Is session_id being generated?**
-```typescript
-const [sessionId] = useState(() => {
-  const id = crypto.randomUUID();
-  console.log('🎯 Generated session_id:', id);  // Should see UUID
-  return id;
-});
+### **Uniqueness Strategy:**
+
+```python
+# FastAPI generates unique identifier:
+phone_number = "+919876543210"
+timestamp_millis = 1699478912345  # Current time in milliseconds
+
+# Unique ID (auto-generated in database):
+unique_id = "+919876543210_1699478912345"
+
+# Multiple searches by same guest:
+Search 1: "+919876543210_1699478912345"
+Search 2: "+919876543210_1699478912567"  ← Different timestamp!
+Search 3: "+919876543210_1699478913012"
 ```
 
-### **Check 2: Is it being passed to ElevenLabs?**
-```typescript
-console.log('📤 Starting conversation with:', {
-  session_id: sessionId,  // Should match generated UUID
-  hotel_id: params.hotelId
-});
-
-await window.elevenlabs.startConversation({
-  variables: { session_id: sessionId }  // Check this line!
-});
-```
-
-### **Check 3: Is ElevenLabs calling webhook with session_id?**
-```
-Check FastAPI logs or Supabase api_logs table:
-- Should see: ?session_id=abc-123-xyz in URL
-- If missing → ElevenLabs not configured correctly
-```
-
-### **Check 4: Are results being written?**
-```sql
--- In Supabase SQL Editor
-SELECT * FROM kiosk_results 
-ORDER BY created_at DESC 
-LIMIT 10;
-
--- Should see rows with your session_ids
-```
-
-### **Check 5: Is subscription receiving?**
-```typescript
-.subscribe((status) => {
-  console.log('📡 Status:', status);  
-  // Should be: "SUBSCRIBED"
-  // If "CHANNEL_ERROR" → Real-time not enabled
-});
-```
+**Why This Works:**
+- Millisecond precision ensures uniqueness
+- Same guest can do multiple searches
+- Each search gets its own results
+- Frontend receives all results for their phone number
 
 ---
 
-## 📞 **Quick Reference**
+### **Frontend Receives Multiple Results:**
 
-### **The Magic Line:**
+If guest does multiple searches, frontend receives all of them:
+
 ```typescript
-// This single line makes everything work:
-variables: {
-  session_id: sessionId,  // ← Pass to ElevenLabs
-  hotel_id: params.hotelId
-}
+.on('postgres_changes', {
+  filter: `phone_number=eq.${phoneNumber}`
+}, (payload) => {
+  // Receives EVERY insert for this phone number
+  const newResults = payload.new.results;
+  
+  // Option 1: Replace with latest (recommended)
+  setEvents(newResults.events);
+  
+  // Option 2: Accumulate (show history)
+  setEvents(prev => [...newResults.events, ...prev]);
+});
 ```
 
-### **What ElevenLabs Does:**
-1. Receives these variables from Next.js
-2. Stores them for the conversation duration
-3. Uses `{{session_id}}` in webhook URL
-4. Replaces with actual value when making HTTP call
-5. FastAPI receives it as query parameter
-
-### **What Happens:**
-```
-Next.js:      session_id = "abc-123"
-              ↓ (pass via variables)
-ElevenLabs:   stores "abc-123"
-              ↓ (uses in webhook)
-FastAPI:      ?session_id=abc-123
-              ↓ (writes to DB)
-Supabase:     session_id = "abc-123"
-              ↓ (broadcasts)
-Next.js:      filter = "abc-123"
-              ✅ Match! Display results!
-```
+**Recommended:** Replace with latest results (Option 1) for clean UX
 
 ---
 
-## 🐛 Common Issues & Solutions
+## 🐛 Troubleshooting
 
-### **Issue 1: "No results appearing on screen"**
+### **Issue 1: "No results appearing"**
 
-**Checklist:**
+**Check:**
 ```typescript
-// 1. Check session_id is generated
-console.log('Session ID:', sessionId);  // Should see UUID
+// 1. Phone number entered?
+console.log('Phone:', phoneNumber);  // Should not be empty
 
-// 2. Check it's passed to ElevenLabs
-console.log('Variables:', { session_id: sessionId });
-
-// 3. Check subscription is active
+// 2. Subscription active?
 .subscribe((status) => {
   console.log('Status:', status);  // Should be "SUBSCRIBED"
 });
 
-// 4. Check results are received
+// 3. Results received?
 .on('postgres_changes', {}, (payload) => {
-  console.log('Received:', payload);  // Should see data
+  console.log('Payload:', payload);  // Should see data
 });
 ```
 
-**Most Common Cause:** Real-time not enabled in Supabase
+**Most Common:** Real-time not enabled
 **Solution:** Run `ALTER TABLE kiosk_results REPLICA IDENTITY FULL;`
 
 ---
 
-### **Issue 2: "ElevenLabs not calling webhook with session_id"**
+### **Issue 2: "Receiving wrong results"**
 
-**Check ElevenLabs Configuration:**
-```
-❌ Wrong: {{session_id}}  (without api_url)
-✅ Correct: {{api_url}}/api/event/by-interests?session_id={{session_id}}
-
-❌ Wrong: Variables not defined in agent
-✅ Correct: Add session_id as custom variable
-
-❌ Wrong: Not passing variables when starting conversation
-✅ Correct: variables: { session_id: sessionId }
-```
-
-**Test in ElevenLabs:**
-- Set test values for variables
-- Check webhook URL in logs
-- Should see: `?session_id=test-123` in URL
-
----
-
-### **Issue 3: "Results appear but for wrong session"**
-
-**Check Filter Syntax:**
+**Check Filter:**
 ```typescript
 // ❌ WRONG
-filter: `session_id=${sessionId}`
+filter: `phone_number=${phoneNumber}`
 
 // ✅ CORRECT (note the 'eq.')
-filter: `session_id=eq.${sessionId}`
+filter: `phone_number=eq.${phoneNumber}`
 ```
 
 ---
 
-### **Issue 4: "Multiple kiosks seeing same results"**
+### **Issue 3: "Phone number validation failed"**
 
-**Cause:** Sharing session_id or wrong filter
-
-**Solution:**
+**Solution:** Phone number format
 ```typescript
-// Generate NEW session_id per kiosk load
-const [sessionId] = useState(() => crypto.randomUUID());
+// ✅ Valid formats:
++919876543210   (India)
++14155552671    (USA)
++442071234567   (UK)
++96362260992    (Syria)
 
-// NOT this (shares across page refreshes):
-const sessionId = 'fixed-id';  // ❌ WRONG
+// ❌ Invalid:
+9876543210      (missing +)
++91 987 654     (spaces not allowed)
 ```
 
----
-
-### **Issue 5: "Subscription status: CHANNEL_ERROR"**
-
-**Cause:** Real-time not enabled in Supabase
-
-**Solution:**
-1. Go to Supabase Dashboard
-2. Database → Replication
-3. Enable for `kiosk_results` table
-4. Save and refresh your app
+**API accepts all international formats!**
 
 ---
 
-## 🧪 Quick Troubleshooting
+### **Issue 4: "Multiple searches showing all results"**
 
-### No results appearing?
-
+**Solution:** Take only latest
 ```typescript
-// Add debug logging
-.on('postgres_changes', {
-  // ... config
-}, (payload) => {
-  console.log('📦 Payload:', payload);  // Add this
-  console.log('🎯 Results:', payload.new.results);  // And this
-  setEvents(payload.new.results.events);
-})
-```
-
-### Subscription not working?
-
-Check browser console for:
-```
-✅ "Subscription status: SUBSCRIBED"
-❌ "Subscription status: CHANNEL_ERROR" → Real-time not enabled
-```
-
-### ElevenLabs not passing session_id?
-
-Check ElevenLabs logs for webhook URL:
-```
-✅ Should see: ?session_id=abc-123-xyz
-❌ If missing: Variables not configured correctly
+.on('postgres_changes', {}, (payload) => {
+  // Only show latest search results
+  setEvents(payload.new.results.events);  // Replaces previous
+  
+  // NOT this (accumulates):
+  // setEvents(prev => [...payload.new.results.events, ...prev]);
+});
 ```
 
 ---
 
-## 📊 Architecture Diagram
+## 🎯 **Why This is Better Than Session ID**
 
-```
-Your Next.js App
-    │
-    ├─ Generate session_id
-    │
-    ├─ Subscribe to Supabase ─────┐
-    │                             │
-    └─ Start ElevenLabs ──────────┼────┐
-                                  │    │
-                                  │    ▼
-                              Supabase   ElevenLabs
-                                  │         │
-                                  │         ▼
-                                  │    Calls FastAPI
-                                  │         │
-                                  │    ┌────┴────┐
-                                  │    │ Results │
-                                  │    └────┬────┘
-                                  │         │
-                                  │    Writes to DB
-                                  │         │
-                                  ▼◄────────┘
-                              Real-time
-                              Broadcast
-                                  │
-                                  ▼
-                          Next.js receives
-                          & displays cards
-```
+| Aspect | Session ID Approach | Phone Number Approach |
+|--------|---------------------|----------------------|
+| **Complexity** | Must pass through ElevenLabs | Already in request body |
+| **ElevenLabs Config** | 3 variables | 3 variables (but simpler) |
+| **Guest Experience** | Transparent | Natural (already entering phone) |
+| **Multi-Search** | New session_id each time | Same phone, different timestamp |
+| **WhatsApp Integration** | Need phone anyway | Already have it! |
+| **User Tracking** | Anonymous sessions | Linked to guest |
+| **Resume on Another Kiosk** | Cannot resume | Can resume with same phone |
+| **Debugging** | Random UUIDs | Real phone numbers (easier) |
+
+**Winner:** Phone Number Approach ✅
 
 ---
 
-## 🎯 Key Points
+## 📊 **Architecture Comparison**
 
-1. **Session ID** - Links voice conversation to UI display
-2. **Real-Time** - Results appear as they're generated
-3. **Zero Cost** - Using Supabase (already have it)
-4. **Fast** - 50-150ms broadcast latency
-5. **Reliable** - Auto-reconnection built-in
-6. **Scalable** - Handles 100+ concurrent sessions
-
----
-
-## ✅ That's It!
-
-**Total setup time:** 5-10 minutes  
-**Code to write:** Copy-paste ready  
-**Cost:** $0  
-**Performance:** Excellent  
-
-**You're ready to demo to Hotel GMs! 🎉**
-
----
-
-## 📞 Need Help?
-
-**Check:**
-1. Browser console for errors
-2. Supabase logs in dashboard
-3. Network tab for subscription status
-4. `REALTIME_SESSION_GUIDE.md` for detailed docs
-
-**Debug command:**
-```javascript
-// In browser console
-supabase.getChannels()  // See active subscriptions
+### **Old (Session ID):**
 ```
+Next.js → Generate session_id → Pass to ElevenLabs → 
+Use in webhook → FastAPI gets session_id → Write with session_id
+```
+
+### **New (Phone Number):** ⭐ SIMPLER
+```
+Next.js → Collect phone_number → Pass to ElevenLabs → 
+Use in webhook → FastAPI generates timestamp → Write with phone + timestamp
+```
+
+**Benefit:** One less moving part, simpler to debug!
 
 ---
 
@@ -1537,65 +1091,113 @@ supabase.getChannels()  // See active subscriptions
 - [ ] Install `@supabase/supabase-js`
 - [ ] Add environment variables (.env.local)
 - [ ] Create `lib/supabase.ts` with Supabase client
-- [ ] Configure ElevenLabs agent with variables
+- [ ] Configure ElevenLabs agent with phone_number variable
 - [ ] Configure webhook URL in ElevenLabs
 
-### **Implementation (Per Page):**
-- [ ] Generate session_id using `crypto.randomUUID()`
-- [ ] Subscribe to Supabase real-time with filter
-- [ ] Pass session_id to ElevenLabs in `variables` object
+### **Implementation:**
+- [ ] Add phone number input field
+- [ ] Validate phone number format (+country code)
+- [ ] Store phone number in React state
+- [ ] Subscribe to Supabase real-time with phone_number filter
+- [ ] Pass phone_number to ElevenLabs in `variables` object
 - [ ] Display events when subscription receives data
 - [ ] Unsubscribe on component unmount
 
 ### **Testing:**
-- [ ] Open browser console - see session_id logged
-- [ ] Start conversation - see "SUBSCRIBED" status
-- [ ] Speak to kiosk - see "Results received!" log
-- [ ] Verify cards appear on screen
+- [ ] Enter phone number
+- [ ] Check subscription status: "SUBSCRIBED"
+- [ ] Start conversation
+- [ ] Speak interests
+- [ ] Verify results appear on screen
 - [ ] Check Supabase table has rows
-- [ ] Test with multiple kiosks (different sessions)
+- [ ] Test multiple searches with same phone
+- [ ] Test with different phone numbers
 
 ### **ElevenLabs Configuration:**
-- [ ] Add custom variables (session_id, hotel_id, api_url)
-- [ ] Set webhook URL with `{{session_id}}` parameter
+- [ ] Add custom variables (phone_number, hotel_id, api_url)
+- [ ] Set webhook URL (no session_id in URL now!)
+- [ ] Add phone_number to request body
 - [ ] Update agent prompt
 - [ ] Test in ElevenLabs dashboard
-- [ ] Verify webhook is called with session_id
 
 ---
 
 ## 🎯 **Critical Code Snippets**
 
-### **1. Generate session_id (once per kiosk load):**
+### **1. Collect phone number:**
 ```typescript
-const [sessionId] = useState(() => crypto.randomUUID());
+const [phoneNumber, setPhoneNumber] = useState('');
+
+<input 
+  type="tel"
+  value={phoneNumber}
+  onChange={(e) => setPhoneNumber(e.target.value)}
+  placeholder="+919876543210"
+/>
 ```
 
-### **2. Pass to ElevenLabs (when starting conversation):**
+### **2. Pass to ElevenLabs:**
 ```typescript
 await window.elevenlabs.startConversation({
   agentId: 'your-agent-id',
   variables: {
-    session_id: sessionId,  // ⭐ THIS IS KEY!
+    phone_number: phoneNumber,  // ⭐ Just phone number!
     hotel_id: params.hotelId
   }
 });
 ```
 
-### **3. Subscribe to real-time (filter by session_id):**
+### **3. Subscribe to real-time:**
 ```typescript
 supabase
-  .channel(`session:${sessionId}`)
+  .channel(`phone:${phoneNumber}`)
   .on('postgres_changes', {
     event: 'INSERT',
     schema: 'public',
     table: 'kiosk_results',
-    filter: `session_id=eq.${sessionId}`  // ⭐ THIS IS KEY!
+    filter: `phone_number=eq.${phoneNumber}`  // ⭐ Filter by phone!
   }, (payload) => {
     setEvents(payload.new.results.events);
   })
   .subscribe();
 ```
+
+---
+
+## 📞 **Key Differences from Session ID Approach**
+
+### **What Changed:**
+
+**Removed:**
+- ❌ Session ID generation in Next.js
+- ❌ Passing session_id through ElevenLabs
+- ❌ session_id in webhook URL query parameter
+
+**Added:**
+- ✅ Phone number input field (needed for WhatsApp anyway)
+- ✅ Phone number validation
+- ✅ Timestamp generation in FastAPI (automatic)
+
+**Simplified:**
+- ✅ ElevenLabs configuration (no session_id variable)
+- ✅ Frontend code (phone already collected)
+- ✅ Debugging (phone numbers are readable)
+
+---
+
+## 🎉 **Summary**
+
+**What Frontend Team Needs:**
+1. ✅ Collect phone number from guest (input field)
+2. ✅ Subscribe to Supabase with phone_number filter
+3. ✅ Pass phone_number to ElevenLabs (simpler!)
+4. ✅ Display results when received
+5. ✅ Use phone_number for WhatsApp sharing
+
+**Total Setup Time:** 5-10 minutes  
+**Complexity:** Simpler than session_id approach!  
+**Cost:** $0  
+**Performance:** Same (50-150ms) ⚡  
 
 ---
 
@@ -1606,7 +1208,7 @@ supabase
 
 **For backend API reference:**
 - See: `README.md`
-- Or visit: https://your-api.vercel.app/docs
+- Or visit: https://fastapi-project-tau.vercel.app/docs
 
 **For database setup:**
 - See: `SUPABASE_SETUP.md`
@@ -1619,18 +1221,6 @@ supabase
 
 ---
 
-## 🎉 **You're All Set!**
-
-**Summary:**
-- ✅ Zero-cost real-time communication
-- ✅ 50-150ms latency (instant!)
-- ✅ Works with multiple kiosks
-- ✅ Production-ready
-- ✅ Complete documentation
-
-**The secret sauce:** Pass `session_id` in the `variables` object! 🔑
-
----
-
 **Happy Coding! 🚀**
 
+**This approach is simpler and better! Phone number = universal identifier! 📱**

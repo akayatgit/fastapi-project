@@ -126,13 +126,17 @@ Stores real-time results for kiosk sessions (enables Next.js to display results)
 ```sql
 CREATE TABLE kiosk_results (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    session_id TEXT NOT NULL,
+    phone_number TEXT NOT NULL,
+    timestamp_millis BIGINT NOT NULL,
+    unique_id TEXT GENERATED ALWAYS AS (phone_number || '_' || timestamp_millis::text) STORED,
     results JSONB NOT NULL,
+    hotel_id TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 -- Indexes for fast lookups
-CREATE INDEX idx_kiosk_results_session ON kiosk_results(session_id);
+CREATE UNIQUE INDEX idx_kiosk_results_unique ON kiosk_results(phone_number, timestamp_millis);
+CREATE INDEX idx_kiosk_results_phone ON kiosk_results(phone_number);
 CREATE INDEX idx_kiosk_results_created ON kiosk_results(created_at DESC);
 
 -- Enable Supabase Real-Time (CRITICAL!)
@@ -151,8 +155,17 @@ $$ LANGUAGE plpgsql;
 **Purpose:** 
 - Temporary storage for event search results
 - Enables real-time push to Next.js frontend
+- Uses phone_number + timestamp_millis as unique identifier
 - Auto-cleanup keeps database clean
-- Each session gets its own results
+- Each search gets its own results
+
+**Columns:**
+- `phone_number`: Guest's phone number (collected for WhatsApp)
+- `timestamp_millis`: Unix timestamp in milliseconds (ensures uniqueness)
+- `unique_id`: Auto-generated combined identifier (phone_123456789)
+- `results`: Complete event search results (JSONB)
+- `hotel_id`: Which hotel the search was from
+- `created_at`: When results were created
 
 **Important:** Run `ALTER TABLE kiosk_results REPLICA IDENTITY FULL;` to enable real-time subscriptions!
 

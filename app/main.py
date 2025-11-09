@@ -19,6 +19,7 @@ import json
 from datetime import datetime
 from typing import List, Dict, Any
 import asyncio
+import time
 from app.core.config import settings
 
 app = FastAPI(
@@ -314,8 +315,9 @@ import re
 from math import radians, cos, sin, asin, sqrt
 
 def validate_phone_number(phone: str) -> bool:
-    """Validate Indian phone number format: +91XXXXXXXXXX"""
-    pattern = r'^\+91[6-9][0-9]{9}$'
+    """Validate international phone number format: +[country_code][number]"""
+    # Basic international format: + followed by 7-15 digits
+    pattern = r'^\+[1-9][0-9]{6,14}$'
     return bool(re.match(pattern, phone))
 
 def get_or_create_user(phone_number: str, username: str = None) -> Dict[str, Any]:
@@ -1635,19 +1637,15 @@ def discover_events_personalized(phone_number: str, request: DiscoverEventsReque
 def get_event_by_interests(
     request: InterestsRequest, 
     background_tasks: BackgroundTasks, 
-    req: Request,
-    session_id: str = None
+    req: Request
 ):
     """
     Get events based on user interests with optional hotel-specific filtering.
     
     Request body:
     - interests: Comma-separated interests (e.g., "music, outdoor, adventure")
-    - phone_number: Optional phone number for tracking and personalization (+91XXXXXXXXXX)
+    - phone_number: Phone number for real-time results and tracking (+91XXXXXXXXXX or international)
     - hotel_id: Optional hotel ID or slug for location-based filtering
-    
-    Query parameters:
-    - session_id: Optional session ID for real-time results push to frontend
     
     The system will:
     1. Use AI to map interests to event categories
@@ -1657,8 +1655,10 @@ def get_event_by_interests(
        - Filter external events by hotel location and search radius
        - Sort by distance from hotel
     4. Return up to 5 matching events with conversational descriptions
-    5. If phone_number provided, track search history and accumulate preferences
-    6. If session_id provided, write results to kiosk_results table for real-time push
+    5. If phone_number provided:
+       - Track search history and accumulate preferences
+       - Write results to kiosk_results table for real-time push to frontend
+       - Frontend subscribes to phone_number to receive results instantly
     
     NOTE: For full personalization features, use /api/users/{phone_number}/discover-events
     """
@@ -1885,15 +1885,20 @@ def get_event_by_interests(
         else:
             response_data["hotel_filtered"] = False
         
-        # Write results to kiosk_results table for real-time push (if session_id provided)
-        if session_id:
+        # Write results to kiosk_results table for real-time push (if phone_number provided)
+        if request.phone_number:
             try:
+                # Generate timestamp in milliseconds for uniqueness
+                timestamp_millis = int(time.time() * 1000)
+                
                 supabase.table('kiosk_results').insert({
-                    "session_id": session_id,
+                    "phone_number": request.phone_number,
+                    "timestamp_millis": timestamp_millis,
                     "results": response_data,
+                    "hotel_id": request.hotel_id,
                     "created_at": datetime.now().isoformat()
                 }).execute()
-                print(f"✅ Results written to session: {session_id}")
+                print(f"✅ Results written for phone: {request.phone_number} at {timestamp_millis}")
             except Exception as e:
                 print(f"⚠️ Failed to write kiosk results: {e}")
                 # Don't fail the request if this fails
