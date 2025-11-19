@@ -23,9 +23,9 @@ import time
 from app.core.config import settings
 
 app = FastAPI(
-    title="Spotive API",
-    description="AI-Powered Event Discovery API for Bangalore",
-    version="0.1.0 (MVP)"
+    title="Spotive Travel Agent Concierge API",
+    description="AI-Powered Travel Package Discovery API for Travel Agents",
+    version="0.2.0 (Travel Agent Concierge)"
 )
 
 # Audit logging storage (in-memory for MVP, can be moved to database later)
@@ -82,46 +82,50 @@ except Exception as e:
     model = None
     llm_available = False
 
-# Create the prompt template for conversational event descriptions
-event_prompt = ChatPromptTemplate.from_messages([
-    ("system", """You are Spotive, a friendly AI event discovery assistant talking to users over the phone in Bangalore, India. 
+# Create the prompt template for conversational package descriptions
+package_prompt = ChatPromptTemplate.from_messages([
+    ("system", """You are Spotive, a friendly AI travel concierge assistant helping clients discover travel packages. 
     
-    You'll be given details about an actual event happening in Bangalore. Your job is to present it in an exciting, conversational way.
+    You'll be given details about a travel package. Your job is to present it in an exciting, conversational way.
     
-    IMPORTANT: Respond in exactly 20 words, talking naturally like you're chatting with a friend over the phone.
-    - Line 1: Introduce the event/place in an exciting way
+    IMPORTANT: Respond in exactly 25 words, talking naturally like you're chatting with a friend over the phone.
+    - Line 1: Introduce the package in an exciting way
     - Line 2: Share what makes it special or what they'll experience
-    - Line 3: Mention location, timing, and price in a casual way
+    - Line 3: Mention destination, duration, and price in a casual way
     
-    Speak like a local Bangalore person. Be enthusiastic but natural!
+    Be enthusiastic but natural! Help them visualize the amazing experience.
     Don't use JSON or structured data - just talk like a normal person would."""),
-    ("human", """Tell me about this event in a friendly, conversational way:
+    ("human", """Tell me about this travel package in a friendly, conversational way:
     
-Event Name: {name}
+Package Name: {name}
 Category: {category}
 Description: {description}
-Location: {location}
-Date: {date}
-Time: {time}
-Price: {price}""")
+Destination: {destination}
+Duration: {duration_days} days
+Price: {price_range}""")
 ])
 
-# LLM prompt to map interests to categories
+# LLM prompt to map interests to package categories
 category_mapping_prompt = ChatPromptTemplate.from_messages([
-    ("system", """You are an intelligent category mapping system for Spotive event discovery.
+    ("system", """You are an intelligent category mapping system for Spotive travel package discovery.
 
-Your job is to map user interests to our predefined event categories.
+Your job is to map user interests to our predefined travel package categories.
 
 **Predefined Categories (ONLY use these exactly):**
-- concert (music events, live performances, DJ nights, music festivals, bands, singing)
-- sports (marathons, cricket, football, fitness events, gym, exercise, running)
-- outdoor (trekking, hiking, nature activities, adventure sports, camping, cycling)
-- food (food festivals, buffet events, culinary experiences, dining, gastronomy)
-- spiritual (religious events, meditation, temple visits, spiritual gatherings, devotional)
-- cultural (art exhibitions, theater, dance performances, traditional events, heritage, museums)
-- kids (children activities, family events, kids workshops, family-friendly)
-- entertainment (general entertainment, movies, games, leisure, shows)
-- comedy (standup comedy, comedy shows, humor, laughter)
+- adventure (adventure tours, trekking, extreme sports, hiking, mountaineering, bungee jumping, rafting)
+- family (family-friendly packages, kid-friendly vacations, multi-generational travel)
+- honeymoon (romantic honeymoon packages, couples retreats, romantic getaways)
+- luxury (high-end luxury packages, premium experiences, VIP travel)
+- beach (beach vacations, seaside resorts, coastal destinations)
+- cultural (cultural tours, heritage sites, historical places, traditional experiences)
+- spiritual (religious tours, pilgrimage, meditation retreats, spiritual journeys)
+- sports (sports-related packages, golf tours, cricket tours, sports events)
+- cruise (cruise packages, ocean cruises, river cruises)
+- safari (wildlife safari packages, jungle tours, animal watching)
+- wellness (spa retreats, yoga packages, wellness vacations, health retreats)
+- group (group tour packages, friends trips, organized tours)
+- solo (solo traveler packages, solo-friendly destinations)
+- corporate (corporate retreats, business travel, MICE packages)
 
 **CRITICAL RULES:**
 1. Return ONLY categories that ACTUALLY match the user's interests
@@ -132,37 +136,51 @@ Your job is to map user interests to our predefined event categories.
 6. Use EXACT category names from the list above
 
 **Examples (Follow these patterns - BE SELECTIVE!):**
-- "comedy" → ["comedy"]
-- "standup" → ["comedy"]
-- "music" → ["concert"]
-- "trekking" → ["outdoor"]
-- "food" → ["food"]
-- "meditation" → ["spiritual"]
-- "kids" → ["kids"]
-- "music, dancing" → ["concert"]
-- "family fun" → ["kids"]
-- "adventure, nature" → ["outdoor"]
-- "food, traditional" → ["food", "cultural"]
-- "fitness, gym" → ["sports"]
-- "comedy, music" → ["comedy", "concert"]
+- "honeymoon" → ["honeymoon"]
+- "romantic getaway" → ["honeymoon"]
+- "beach vacation" → ["beach"]
+- "trekking adventure" → ["adventure"]
+- "family trip" → ["family"]
+- "luxury holiday" → ["luxury"]
+- "yoga retreat" → ["wellness"]
+- "wildlife safari" → ["safari"]
+- "cultural heritage" → ["cultural"]
+- "beach, luxury" → ["beach", "luxury"]
+- "family, beach" → ["family", "beach"]
+- "honeymoon, beach" → ["honeymoon", "beach"]
+- "adventure, trekking" → ["adventure"]
 
-**DO NOT return all 8 categories - only return what matches!**
+**DO NOT return all 14 categories - only return what matches!**
 """),
     ("human", "User interests: {interests}\n\nReturn ONLY the JSON array of matching categories (max 3):")
 ])
 
 # Pydantic models for requests and responses
-class InterestsRequest(BaseModel):
+class PackageInterestsRequest(BaseModel):
     interests: str  # Comma-separated interests
     phone_number: str = None  # Optional: for personalized recommendations
-    hotel_id: str = None  # Optional: filter events by hotel location
+    travel_agent_id: str = None  # Optional: filter packages by travel agent
     
     class Config:
         json_schema_extra = {
             "example": {
-                "interests": "music, outdoor, adventure",
+                "interests": "honeymoon, beach, romantic",
                 "phone_number": "+919876543210",
-                "hotel_id": "marriott-bangalore"
+                "travel_agent_id": "spotive-travel"
+            }
+        }
+
+class PackageDestinationRequest(BaseModel):
+    destination: str  # Destination name (e.g., "Maldives", "Bali")
+    phone_number: str = None  # Optional: for personalized recommendations
+    travel_agent_id: str = None  # Optional: filter packages by travel agent
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "destination": "Maldives",
+                "phone_number": "+919876543210",
+                "travel_agent_id": "spotive-travel"
             }
         }
 
@@ -180,139 +198,38 @@ class UserRegisterRequest(BaseModel):
 
 class UserPreferencesUpdate(BaseModel):
     preferred_categories: List[str] = None
-    preferred_locations: List[str] = None
-    preferred_time_slots: List[str] = None
-    price_range: Dict[str, int] = None
+    preferred_destinations: List[str] = None  # Changed from preferred_locations
+    preferred_duration_days: Dict[str, int] = None  # {"min": 5, "max": 10}
+    price_range: Dict[str, Any] = None  # {"min": 50000, "max": 200000, "currency": "INR"}
     avoid_categories: List[str] = None
+    avoid_destinations: List[str] = None
     
     class Config:
         json_schema_extra = {
             "example": {
-                "preferred_categories": ["comedy", "outdoor"],
-                "preferred_locations": ["Indiranagar", "Koramangala"],
-                "preferred_time_slots": ["evening", "weekend"],
-                "price_range": {"min": 0, "max": 1500},
-                "avoid_categories": ["spiritual"]
+                "preferred_categories": ["honeymoon", "beach"],
+                "preferred_destinations": ["Maldives", "Bali"],
+                "preferred_duration_days": {"min": 5, "max": 10},
+                "price_range": {"min": 100000, "max": 300000, "currency": "INR"},
+                "avoid_categories": ["safari"],
+                "avoid_destinations": []
             }
         }
 
-class DiscoverEventsRequest(BaseModel):
+class DiscoverPackagesRequest(BaseModel):
     interests: str = None  # Optional: can use profile only if empty
     
     class Config:
         json_schema_extra = {
             "example": {
-                "interests": "comedy"
+                "interests": "honeymoon"
             }
         }
 
-# ==================== HOTEL MANAGEMENT MODELS ====================
+# Hotel management models removed - not needed for Travel Agent Concierge
 
-class HotelCreate(BaseModel):
-    name: str
-    slug: str  # URL-friendly identifier
-    location_city: str
-    location_area: str = None
-    address: str = None
-    country_code: str = "IN"
-    timezone: str = "Asia/Kolkata"
-    logo_url: str = None
-    brand_colors: Dict[str, str] = {"primary": "#000000", "secondary": "#FFFFFF"}
-    theme_config: Dict[str, Any] = {}
-    latitude: float = None
-    longitude: float = None
-    search_radius_km: int = 10
-    metadata: Dict[str, Any] = {}
-    
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "name": "Taj Wellington Mews",
-                "slug": "taj-mumbai",
-                "location_city": "Mumbai",
-                "location_area": "Colaba",
-                "address": "123 MG Road, Mumbai",
-                "logo_url": "https://example.com/logo.png",
-                "brand_colors": {
-                    "primary": "#C4A962",
-                    "secondary": "#1A1A1A"
-                },
-                "latitude": 18.9220,
-                "longitude": 72.8347,
-                "search_radius_km": 15
-            }
-        }
-
-class HotelUpdate(BaseModel):
-    name: str = None
-    location_city: str = None
-    location_area: str = None
-    address: str = None
-    logo_url: str = None
-    brand_colors: Dict[str, str] = None
-    theme_config: Dict[str, Any] = None
-    latitude: float = None
-    longitude: float = None
-    search_radius_km: int = None
-    is_active: bool = None
-    metadata: Dict[str, Any] = None
-
-class HotelServiceCreate(BaseModel):
-    service_type: str  # spa, restaurant, bar, tour, cab, etc.
-    name: str
-    description: str = None
-    short_description: str = None
-    price_range: str = None
-    price_min: float = None
-    price_max: float = None
-    currency: str = "INR"
-    available_hours: str = None
-    image_url: str = None
-    booking_link: str = None
-    phone_number: str = None
-    is_featured: bool = False
-    display_order: int = 0
-    metadata: Dict[str, Any] = {}
-    
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "service_type": "spa",
-                "name": "Jiva Spa",
-                "short_description": "Rejuvenating spa treatments",
-                "description": "Experience traditional Indian wellness...",
-                "price_range": "₹3000 - ₹8000",
-                "price_min": 3000,
-                "price_max": 8000,
-                "available_hours": "10:00 AM - 10:00 PM",
-                "image_url": "https://example.com/spa.jpg",
-                "booking_link": "https://hotel.com/spa",
-                "phone_number": "+912212345678",
-                "is_featured": True,
-                "display_order": 1
-            }
-        }
-
-class HotelServiceUpdate(BaseModel):
-    service_type: str = None
-    name: str = None
-    description: str = None
-    short_description: str = None
-    price_range: str = None
-    price_min: float = None
-    price_max: float = None
-    available_hours: str = None
-    image_url: str = None
-    booking_link: str = None
-    phone_number: str = None
-    is_featured: bool = None
-    display_order: int = None
-    is_active: bool = None
-    metadata: Dict[str, Any] = None
-
-# Helper functions for user management and hotel operations
+# Helper functions for user management
 import re
-from math import radians, cos, sin, asin, sqrt
 
 def validate_phone_number(phone: str) -> bool:
     """Validate international phone number format: +[country_code][number]"""
@@ -349,8 +266,8 @@ def get_or_create_user(phone_number: str, username: str = None) -> Dict[str, Any
         print(f"Error in get_or_create_user: {e}")
         return None
 
-def track_user_search(phone_number: str, interests: str, mapped_categories: list, results_count: int):
-    """Track user search and accumulate preferences"""
+def track_user_search(phone_number: str, search_query: str, search_type: str, mapped_categories: list = None, destination: str = None, results_count: int = 0):
+    """Track user search and accumulate preferences (supports both interests and destination searches)"""
     try:
         # Get user
         user_response = supabase.table('users').select("*").eq('phone_number', phone_number).execute()
@@ -363,8 +280,10 @@ def track_user_search(phone_number: str, interests: str, mapped_categories: list
         # Insert search history
         search_entry = {
             "user_id": user_id,
-            "search_query": interests,
-            "mapped_categories": mapped_categories,
+            "search_query": search_query,
+            "search_type": search_type,  # 'interests' or 'destination'
+            "mapped_categories": mapped_categories or [],
+            "destination": destination,
             "search_timestamp": datetime.now().isoformat(),
             "results_count": results_count
         }
@@ -375,15 +294,30 @@ def track_user_search(phone_number: str, interests: str, mapped_categories: list
         if not isinstance(favorite_categories, dict):
             favorite_categories = {}
         
-        for category in mapped_categories:
-            favorite_categories[category] = favorite_categories.get(category, 0) + 1
+        if mapped_categories:
+            for category in mapped_categories:
+                favorite_categories[category] = favorite_categories.get(category, 0) + 1
+        
+        # Update user's favorite_destinations (if destination search)
+        favorite_destinations = user.get('favorite_destinations', {})
+        if not isinstance(favorite_destinations, dict):
+            favorite_destinations = {}
+        
+        if destination:
+            favorite_destinations[destination] = favorite_destinations.get(destination, 0) + 1
         
         # Update user record
-        supabase.table('users').update({
-            "favorite_categories": favorite_categories,
+        update_data = {
             "total_searches": user.get('total_searches', 0) + 1,
             "last_active": datetime.now().isoformat()
-        }).eq('phone_number', phone_number).execute()
+        }
+        
+        if mapped_categories:
+            update_data["favorite_categories"] = favorite_categories
+        if destination:
+            update_data["favorite_destinations"] = favorite_destinations
+        
+        supabase.table('users').update(update_data).eq('phone_number', phone_number).execute()
         
     except Exception as e:
         print(f"Error tracking user search: {e}")
@@ -406,174 +340,31 @@ def get_user_top_categories(phone_number: str, limit: int = 3) -> List[str]:
         print(f"Error getting user top categories: {e}")
         return []
 
-def get_hotel_by_id_or_slug(hotel_id: str) -> Dict[str, Any]:
-    """Get hotel details by ID or slug"""
-    try:
-        # Try by ID first
-        result = supabase.table('hotels').select("*").eq('id', hotel_id).execute()
-        
-        # If not found, try by slug
-        if not result.data:
-            result = supabase.table('hotels').select("*").eq('slug', hotel_id).execute()
-        
-        if result.data:
-            return result.data[0]
-        return None
-    except Exception as e:
-        print(f"Error getting hotel: {e}")
-        return None
-
-def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """
-    Calculate distance between two points using Haversine formula
-    Returns distance in kilometers
-    """
-    if not all([lat1, lon1, lat2, lon2]):
-        return float('inf')
-    
-    # Convert to radians
-    lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
-    
-    # Haversine formula
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
-    c = 2 * asin(sqrt(a))
-    
-    # Earth radius in kilometers
-    r = 6371
-    
-    return c * r
-
-def filter_events_by_hotel_location(events: List[Dict], hotel: Dict[str, Any]) -> List[Dict]:
-    """
-    Filter and sort events based on hotel location and search radius
-    Returns events within radius, sorted by distance
-    """
-    if not hotel:
-        return events
-    
-    hotel_lat = hotel.get('latitude')
-    hotel_lon = hotel.get('longitude')
-    hotel_city = hotel.get('location_city', '').lower()
-    search_radius = hotel.get('search_radius_km', 10)
-    
-    filtered_events = []
-    
-    for event in events:
-        # If hotel has coordinates and event has coordinates, use distance
-        event_lat = event.get('latitude')
-        event_lon = event.get('longitude')
-        
-        if hotel_lat and hotel_lon and event_lat and event_lon:
-            distance = calculate_distance(hotel_lat, hotel_lon, event_lat, event_lon)
-            if distance <= search_radius:
-                event['distance_km'] = round(distance, 2)
-                filtered_events.append(event)
-        else:
-            # Fallback: Filter by city name
-            event_location = event.get('location', '').lower()
-            if hotel_city in event_location or 'bangalore' in event_location:
-                event['distance_km'] = None  # Unknown distance
-                filtered_events.append(event)
-    
-    # Sort by distance (closest first), events without distance go to end
-    filtered_events.sort(key=lambda x: x.get('distance_km') if x.get('distance_km') is not None else float('inf'))
-    
-    return filtered_events
-
-def get_hotel_services_as_events(hotel_id: str, categories: List[str]) -> List[Dict]:
-    """
-    Get hotel services and format them as event objects
-    Matches services to requested categories
-    """
-    try:
-        # Get hotel
-        hotel = get_hotel_by_id_or_slug(hotel_id)
-        if not hotel:
-            return []
-        
-        actual_hotel_id = hotel['id']
-        
-        # Get all active services for the hotel
-        services_response = supabase.table('hotel_services')\
-            .select("*")\
-            .eq('hotel_id', actual_hotel_id)\
-            .eq('is_active', True)\
-            .order('is_featured', desc=True)\
-            .order('display_order')\
-            .execute()
-        
-        if not services_response.data:
-            return []
-        
-        # Map service types to event categories
-        service_to_category_map = {
-            'spa': 'entertainment',
-            'restaurant': 'food',
-            'bar': 'entertainment',
-            'gym': 'sports',
-            'pool': 'outdoor',
-            'tour': 'outdoor',
-            'cab': 'entertainment',
-            'room_service': 'food'
-        }
-        
-        # Convert services to event format
-        service_events = []
-        for service in services_response.data:
-            service_type = service.get('service_type', '')
-            category = service_to_category_map.get(service_type, 'entertainment')
-            
-            # Only include if matches requested categories
-            if categories and category not in categories:
-                continue
-            
-            # Format as event object
-            service_event = {
-                'id': service.get('id'),
-                'name': service.get('name'),
-                'category': category,
-                'description': service.get('description') or service.get('short_description', ''),
-                'location': f"{hotel.get('name')} - {hotel.get('location_area', hotel.get('location_city'))}",
-                'date': 'Available daily',
-                'time': service.get('available_hours', 'Contact hotel'),
-                'price': service.get('price_range', 'See hotel for pricing'),
-                'image_url': service.get('image_url'),
-                'booking_link': service.get('booking_link'),
-                'is_hotel_service': True,
-                'service_type': service_type,
-                'hotel_id': actual_hotel_id,
-                'distance_km': 0,  # Hotel services are at 0 distance
-                'is_featured': service.get('is_featured', False)
-            }
-            service_events.append(service_event)
-        
-        return service_events
-    except Exception as e:
-        print(f"Error getting hotel services: {e}")
-        return []
-
-# Keyword-based category matching as fallback
+# Keyword-based category matching as fallback (for packages)
 def keyword_match_categories(interests: str, valid_categories: list) -> list:
     """
     Fallback keyword matching when LLM fails
-    Maps interests to categories using keyword matching
+    Maps interests to package categories using keyword matching
     """
     interests_lower = interests.lower()
     matched = []
     
-    # Keyword mappings - must align with database categories
+    # Keyword mappings - must align with package categories
     keyword_map = {
-        "concert": ["music", "concert", "band", "dj", "singing", "song", "live music", "performance", "festival"],
-        "sports": ["sport", "fitness", "exercise", "gym", "marathon", "running", "cricket", "football", "game", "athletic"],
-        "outdoor": ["outdoor", "trek", "hike", "nature", "adventure", "camping", "cycling", "mountain", "trail"],
-        "food": ["food", "buffet", "culinary", "dining", "cuisine", "feast", "gastronomy", "eat"],
-        "spiritual": ["spiritual", "meditation", "temple", "religious", "prayer", "worship", "devotion", "peace", "mandir"],
-        "cultural": ["cultural", "art", "theater", "theatre", "dance", "traditional", "heritage", "museum", "exhibition", "classical"],
-        "kids": ["kid", "child", "children", "family", "family-friendly"],
-        "entertainment": ["entertainment", "show", "movie", "film", "leisure", "general fun"],
-        "comedy": ["comedy", "standup", "stand-up", "humor", "laugh", "comic", "comedian", "funny"],
+        "adventure": ["adventure", "trek", "trekking", "hike", "hiking", "mountaineering", "bungee", "rafting", "extreme", "outdoor"],
+        "family": ["family", "kid", "kids", "children", "child-friendly", "multi-generational"],
+        "honeymoon": ["honeymoon", "romantic", "couples", "romance", "wedding", "anniversary"],
+        "luxury": ["luxury", "luxurious", "premium", "vip", "exclusive", "high-end", "deluxe"],
+        "beach": ["beach", "beaches", "seaside", "coastal", "island", "ocean", "sea", "tropical"],
+        "cultural": ["cultural", "culture", "heritage", "historical", "history", "tradition", "traditional"],
+        "spiritual": ["spiritual", "spirituality", "pilgrimage", "meditation", "religious", "temple", "church"],
+        "sports": ["sports", "sport", "golf", "cricket", "football", "tennis", "athletic"],
+        "cruise": ["cruise", "cruises", "ship", "ocean cruise", "river cruise"],
+        "safari": ["safari", "wildlife", "jungle", "animal", "zoo", "national park", "conservation"],
+        "wellness": ["wellness", "spa", "yoga", "retreat", "health", "meditation", "relaxation"],
+        "group": ["group", "groups", "friends", "organized", "tour group"],
+        "solo": ["solo", "alone", "solo travel", "solo-friendly", "independent"],
+        "corporate": ["corporate", "business", "mice", "conference", "retreat", "team building"],
     }
     
     # Check each category
@@ -670,559 +461,8 @@ def read_root():
 
 # ==================== HOTEL MANAGEMENT ENDPOINTS ====================
 
-@app.post("/api/hotels")
-def create_hotel(hotel: HotelCreate):
-    """
-    Create a new hotel in the system
-    
-    Request body:
-    - name: Hotel name
-    - slug: URL-friendly identifier (must be unique)
-    - location_city: City where hotel is located
-    - location_area: Specific area/neighborhood
-    - brand_colors: Primary and secondary colors
-    - logo_url: URL to hotel logo
-    - search_radius_km: Default search radius for events
-    
-    Returns the created hotel with ID
-    """
-    try:
-        # Check if slug already exists
-        existing = supabase.table('hotels').select("id").eq('slug', hotel.slug).execute()
-        if existing.data:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "success": False,
-                    "error": f"Hotel with slug '{hotel.slug}' already exists"
-                }
-            )
-        
-        # Prepare hotel data
-        hotel_data = {
-            "name": hotel.name,
-            "slug": hotel.slug,
-            "location_city": hotel.location_city,
-            "location_area": hotel.location_area,
-            "address": hotel.address,
-            "country_code": hotel.country_code,
-            "timezone": hotel.timezone,
-            "logo_url": hotel.logo_url,
-            "brand_colors": hotel.brand_colors,
-            "theme_config": hotel.theme_config,
-            "latitude": hotel.latitude,
-            "longitude": hotel.longitude,
-            "search_radius_km": hotel.search_radius_km,
-            "metadata": hotel.metadata,
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat()
-        }
-        
-        # Insert hotel
-        result = supabase.table('hotels').insert(hotel_data).execute()
-        
-        return JSONResponse(content={
-            "success": True,
-            "message": "Hotel created successfully",
-            "hotel": result.data[0] if result.data else hotel_data
-        })
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "error": str(e)
-            }
-        )
-
-@app.get("/api/hotels")
-def list_hotels(is_active: bool = None):
-    """
-    List all hotels in the system
-    
-    Query parameters:
-    - is_active: Filter by active status (optional)
-    
-    Returns list of all hotels
-    """
-    try:
-        query = supabase.table('hotels').select("*")
-        
-        if is_active is not None:
-            query = query.eq('is_active', is_active)
-        
-        result = query.order('created_at', desc=True).execute()
-        
-        return JSONResponse(content={
-            "success": True,
-            "count": len(result.data) if result.data else 0,
-            "hotels": result.data if result.data else []
-        })
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "error": str(e)
-            }
-        )
-
-@app.get("/api/hotels/{hotel_id}")
-def get_hotel(hotel_id: str):
-    """
-    Get hotel details by ID or slug
-    
-    Path parameter:
-    - hotel_id: Hotel UUID or slug
-    
-    Returns complete hotel information
-    """
-    try:
-        # Try to get by ID first
-        result = supabase.table('hotels').select("*").eq('id', hotel_id).execute()
-        
-        # If not found, try by slug
-        if not result.data:
-            result = supabase.table('hotels').select("*").eq('slug', hotel_id).execute()
-        
-        if not result.data:
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "success": False,
-                    "error": "Hotel not found"
-                }
-            )
-        
-        return JSONResponse(content={
-            "success": True,
-            "hotel": result.data[0]
-        })
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "error": str(e)
-            }
-        )
-
-@app.put("/api/hotels/{hotel_id}")
-def update_hotel(hotel_id: str, hotel: HotelUpdate):
-    """
-    Update hotel information
-    
-    Path parameter:
-    - hotel_id: Hotel UUID or slug
-    
-    Request body: All fields are optional, only provided fields will be updated
-    """
-    try:
-        # Check if hotel exists
-        existing = supabase.table('hotels').select("id").eq('id', hotel_id).execute()
-        if not existing.data:
-            existing = supabase.table('hotels').select("id").eq('slug', hotel_id).execute()
-        
-        if not existing.data:
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "success": False,
-                    "error": "Hotel not found"
-                }
-            )
-        
-        actual_hotel_id = existing.data[0]['id']
-        
-        # Prepare update data (only non-None fields)
-        update_data = {}
-        if hotel.name is not None:
-            update_data['name'] = hotel.name
-        if hotel.location_city is not None:
-            update_data['location_city'] = hotel.location_city
-        if hotel.location_area is not None:
-            update_data['location_area'] = hotel.location_area
-        if hotel.address is not None:
-            update_data['address'] = hotel.address
-        if hotel.logo_url is not None:
-            update_data['logo_url'] = hotel.logo_url
-        if hotel.brand_colors is not None:
-            update_data['brand_colors'] = hotel.brand_colors
-        if hotel.theme_config is not None:
-            update_data['theme_config'] = hotel.theme_config
-        if hotel.latitude is not None:
-            update_data['latitude'] = hotel.latitude
-        if hotel.longitude is not None:
-            update_data['longitude'] = hotel.longitude
-        if hotel.search_radius_km is not None:
-            update_data['search_radius_km'] = hotel.search_radius_km
-        if hotel.is_active is not None:
-            update_data['is_active'] = hotel.is_active
-        if hotel.metadata is not None:
-            update_data['metadata'] = hotel.metadata
-        
-        update_data['updated_at'] = datetime.now().isoformat()
-        
-        # Update hotel
-        result = supabase.table('hotels').update(update_data).eq('id', actual_hotel_id).execute()
-        
-        return JSONResponse(content={
-            "success": True,
-            "message": "Hotel updated successfully",
-            "hotel": result.data[0] if result.data else update_data
-        })
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "error": str(e)
-            }
-        )
-
-@app.delete("/api/hotels/{hotel_id}")
-def delete_hotel(hotel_id: str):
-    """
-    Delete a hotel (soft delete by setting is_active=false)
-    
-    Path parameter:
-    - hotel_id: Hotel UUID or slug
-    """
-    try:
-        # Update is_active to false instead of hard delete
-        result = supabase.table('hotels').update({
-            "is_active": False,
-            "updated_at": datetime.now().isoformat()
-        }).eq('id', hotel_id).execute()
-        
-        if not result.data:
-            result = supabase.table('hotels').update({
-                "is_active": False,
-                "updated_at": datetime.now().isoformat()
-            }).eq('slug', hotel_id).execute()
-        
-        if not result.data:
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "success": False,
-                    "error": "Hotel not found"
-                }
-            )
-        
-        return JSONResponse(content={
-            "success": True,
-            "message": "Hotel deactivated successfully"
-        })
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "error": str(e)
-            }
-        )
-
-@app.get("/api/hotels/{hotel_id}/config")
-def get_hotel_config(hotel_id: str):
-    """
-    Get hotel configuration for kiosk frontend
-    
-    Path parameter:
-    - hotel_id: Hotel UUID or slug
-    
-    Returns hotel branding, location settings, and configuration
-    """
-    try:
-        # Get hotel by ID or slug
-        result = supabase.table('hotels').select("*").eq('id', hotel_id).execute()
-        if not result.data:
-            result = supabase.table('hotels').select("*").eq('slug', hotel_id).execute()
-        
-        if not result.data:
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "success": False,
-                    "error": "Hotel not found"
-                }
-            )
-        
-        hotel = result.data[0]
-        
-        # Return configuration optimized for frontend
-        return JSONResponse(content={
-            "success": True,
-            "config": {
-                "hotel_id": hotel['id'],
-                "hotel_name": hotel['name'],
-                "slug": hotel['slug'],
-                "branding": {
-                    "logo_url": hotel.get('logo_url'),
-                    "brand_colors": hotel.get('brand_colors', {}),
-                    "theme_config": hotel.get('theme_config', {})
-                },
-                "location": {
-                    "city": hotel['location_city'],
-                    "area": hotel.get('location_area'),
-                    "address": hotel.get('address'),
-                    "latitude": hotel.get('latitude'),
-                    "longitude": hotel.get('longitude'),
-                    "search_radius_km": hotel.get('search_radius_km', 10)
-                },
-                "settings": {
-                    "timezone": hotel.get('timezone', 'Asia/Kolkata'),
-                    "country_code": hotel.get('country_code', 'IN'),
-                    "is_active": hotel.get('is_active', True)
-                }
-            }
-        })
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "error": str(e)
-            }
-        )
-
-# ==================== HOTEL SERVICES ENDPOINTS ====================
-
-@app.post("/api/hotels/{hotel_id}/services")
-def create_hotel_service(hotel_id: str, service: HotelServiceCreate):
-    """
-    Create a new service for a hotel (spa, restaurant, bar, etc.)
-    
-    Path parameter:
-    - hotel_id: Hotel UUID or slug
-    
-    Request body: Service details including type, name, pricing, etc.
-    """
-    try:
-        # Verify hotel exists
-        hotel_result = supabase.table('hotels').select("id").eq('id', hotel_id).execute()
-        if not hotel_result.data:
-            hotel_result = supabase.table('hotels').select("id").eq('slug', hotel_id).execute()
-        
-        if not hotel_result.data:
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "success": False,
-                    "error": "Hotel not found"
-                }
-            )
-        
-        actual_hotel_id = hotel_result.data[0]['id']
-        
-        # Prepare service data
-        service_data = {
-            "hotel_id": actual_hotel_id,
-            "service_type": service.service_type,
-            "name": service.name,
-            "description": service.description,
-            "short_description": service.short_description,
-            "price_range": service.price_range,
-            "price_min": service.price_min,
-            "price_max": service.price_max,
-            "currency": service.currency,
-            "available_hours": service.available_hours,
-            "image_url": service.image_url,
-            "booking_link": service.booking_link,
-            "phone_number": service.phone_number,
-            "is_featured": service.is_featured,
-            "display_order": service.display_order,
-            "metadata": service.metadata,
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat()
-        }
-        
-        # Insert service
-        result = supabase.table('hotel_services').insert(service_data).execute()
-        
-        return JSONResponse(content={
-            "success": True,
-            "message": "Service created successfully",
-            "service": result.data[0] if result.data else service_data
-        })
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "error": str(e)
-            }
-        )
-
-@app.get("/api/hotels/{hotel_id}/services")
-def list_hotel_services(hotel_id: str, service_type: str = None, is_featured: bool = None, is_active: bool = True):
-    """
-    List all services for a hotel
-    
-    Path parameter:
-    - hotel_id: Hotel UUID or slug
-    
-    Query parameters:
-    - service_type: Filter by service type (spa, restaurant, bar, etc.)
-    - is_featured: Filter by featured status
-    - is_active: Filter by active status (default: true)
-    
-    Returns list of hotel services
-    """
-    try:
-        # Get hotel ID
-        hotel_result = supabase.table('hotels').select("id").eq('id', hotel_id).execute()
-        if not hotel_result.data:
-            hotel_result = supabase.table('hotels').select("id").eq('slug', hotel_id).execute()
-        
-        if not hotel_result.data:
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "success": False,
-                    "error": "Hotel not found"
-                }
-            )
-        
-        actual_hotel_id = hotel_result.data[0]['id']
-        
-        # Build query
-        query = supabase.table('hotel_services').select("*").eq('hotel_id', actual_hotel_id)
-        
-        if service_type:
-            query = query.eq('service_type', service_type)
-        if is_featured is not None:
-            query = query.eq('is_featured', is_featured)
-        if is_active is not None:
-            query = query.eq('is_active', is_active)
-        
-        result = query.order('display_order').order('created_at', desc=True).execute()
-        
-        return JSONResponse(content={
-            "success": True,
-            "count": len(result.data) if result.data else 0,
-            "services": result.data if result.data else []
-        })
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "error": str(e)
-            }
-        )
-
-@app.put("/api/hotels/{hotel_id}/services/{service_id}")
-def update_hotel_service(hotel_id: str, service_id: str, service: HotelServiceUpdate):
-    """
-    Update a hotel service
-    
-    Path parameters:
-    - hotel_id: Hotel UUID or slug
-    - service_id: Service UUID
-    
-    Request body: All fields are optional
-    """
-    try:
-        # Prepare update data
-        update_data = {}
-        if service.service_type is not None:
-            update_data['service_type'] = service.service_type
-        if service.name is not None:
-            update_data['name'] = service.name
-        if service.description is not None:
-            update_data['description'] = service.description
-        if service.short_description is not None:
-            update_data['short_description'] = service.short_description
-        if service.price_range is not None:
-            update_data['price_range'] = service.price_range
-        if service.price_min is not None:
-            update_data['price_min'] = service.price_min
-        if service.price_max is not None:
-            update_data['price_max'] = service.price_max
-        if service.available_hours is not None:
-            update_data['available_hours'] = service.available_hours
-        if service.image_url is not None:
-            update_data['image_url'] = service.image_url
-        if service.booking_link is not None:
-            update_data['booking_link'] = service.booking_link
-        if service.phone_number is not None:
-            update_data['phone_number'] = service.phone_number
-        if service.is_featured is not None:
-            update_data['is_featured'] = service.is_featured
-        if service.display_order is not None:
-            update_data['display_order'] = service.display_order
-        if service.is_active is not None:
-            update_data['is_active'] = service.is_active
-        if service.metadata is not None:
-            update_data['metadata'] = service.metadata
-        
-        update_data['updated_at'] = datetime.now().isoformat()
-        
-        # Update service
-        result = supabase.table('hotel_services').update(update_data).eq('id', service_id).execute()
-        
-        if not result.data:
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "success": False,
-                    "error": "Service not found"
-                }
-            )
-        
-        return JSONResponse(content={
-            "success": True,
-            "message": "Service updated successfully",
-            "service": result.data[0]
-        })
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "error": str(e)
-            }
-        )
-
-@app.delete("/api/hotels/{hotel_id}/services/{service_id}")
-def delete_hotel_service(hotel_id: str, service_id: str):
-    """
-    Delete a hotel service (soft delete)
-    
-    Path parameters:
-    - hotel_id: Hotel UUID or slug
-    - service_id: Service UUID
-    """
-    try:
-        result = supabase.table('hotel_services').update({
-            "is_active": False,
-            "updated_at": datetime.now().isoformat()
-        }).eq('id', service_id).execute()
-        
-        if not result.data:
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "success": False,
-                    "error": "Service not found"
-                }
-            )
-        
-        return JSONResponse(content={
-            "success": True,
-            "message": "Service deactivated successfully"
-        })
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "error": str(e)
-            }
-        )
-
 # ==================== USER MANAGEMENT ENDPOINTS ====================
+# Note: All hotel-related endpoints have been removed for Travel Agent Concierge use case
 
 @app.post("/api/users/register")
 def register_user(request: UserRegisterRequest):
@@ -1459,18 +699,18 @@ def update_user_preferences(phone_number: str, preferences: UserPreferencesUpdat
             }
         )
 
-@app.post("/api/users/{phone_number}/discover-events")
-def discover_events_personalized(phone_number: str, request: DiscoverEventsRequest, background_tasks: BackgroundTasks, req: Request):
+@app.post("/api/users/{phone_number}/discover-packages")
+def discover_packages_personalized(phone_number: str, request: DiscoverPackagesRequest, background_tasks: BackgroundTasks, req: Request):
     """
-    Discover events with personalization based on user profile
+    Discover packages with personalization based on client profile
     
     Path parameter:
-    - phone_number: User's phone number
+    - phone_number: Client's phone number
     
     Request body:
-    - interests: Optional comma-separated interests. If empty, uses user's profile
+    - interests: Optional comma-separated interests. If empty, uses client's profile
     
-    This endpoint combines user's search with their accumulated preferences for better recommendations
+    This endpoint combines client's search with their accumulated preferences for better recommendations
     """
     try:
         # Validate phone number
@@ -1512,8 +752,8 @@ def discover_events_personalized(phone_number: str, request: DiscoverEventsReque
                 )
             combined_interests = ", ".join(user_top_categories)
         
-        # Use the same logic as /api/event/by-interests
-        valid_categories = ["concert", "sports", "outdoor", "food", "spiritual", "cultural", "kids", "entertainment", "comedy"]
+        # Use the same logic as /api/package/by-interests
+        valid_categories = ["adventure", "family", "honeymoon", "luxury", "beach", "cultural", "spiritual", "sports", "cruise", "safari", "wellness", "group", "solo", "corporate"]
         
         # Map interests to categories
         categories = []
@@ -1543,72 +783,81 @@ def discover_events_personalized(phone_number: str, request: DiscoverEventsReque
                 status_code=400,
                 content={
                     "success": False,
-                    "message": "Could not map interests to event categories",
-                    "hint": "Try: music, comedy, sports, outdoor, food"
+                    "message": "Could not map interests to package categories",
+                    "hint": "Try: honeymoon, adventure, family, beach, luxury"
                 }
             )
         
-        # Query events
-        events = []
+        # Query packages
+        packages = []
         for category in categories:
-            response = supabase.table('events').select("*").eq('category', category).execute()
+            response = supabase.table('packages').select("*").eq('category', category).eq('is_active', True).order('is_featured', desc=True).execute()
             if response.data:
-                events.extend(response.data)
+                packages.extend(response.data)
         
-        if not events:
+        if not packages:
             # Track search
-            track_user_search(phone_number, combined_interests, categories, 0)
+            track_user_search(phone_number, combined_interests, "interests", categories, None, 0)
             
             return JSONResponse(
                 status_code=404,
                 content={
                     "success": False,
-                    "message": "No events found matching your interests"
+                    "message": "No packages found matching your interests"
                 }
             )
         
-        # Select up to 5 events
-        selected_events = events[:5] if len(events) > 5 else events
+        # Select up to 5 packages
+        selected_packages = packages[:5] if len(packages) > 5 else packages
         
         # Generate conversational descriptions
-        events_with_suggestions = []
+        packages_with_suggestions = []
         
-        for event in selected_events:
+        for package in selected_packages:
             if llm_available and model:
                 try:
-                    chain = event_prompt | model
+                    chain = package_prompt | model
                     llm_response = chain.invoke({
-                        "name": event.get("name", "Unknown Event"),
-                        "category": event.get("category", "event"),
-                        "description": event.get("description", "An exciting event"),
-                        "location": event.get("location", "Bangalore"),
-                        "date": event.get("date", "Soon"),
-                        "time": event.get("time", "TBA"),
-                        "price": event.get("price", "Contact organizer")
+                        "name": package.get("name", "Unknown Package"),
+                        "category": package.get("category", "package"),
+                        "description": package.get("description") or package.get("short_description", "An amazing travel package"),
+                        "destination": package.get("destination", "Unknown"),
+                        "duration_days": package.get("duration_days", 0),
+                        "price_range": package.get("price_range", "Contact for pricing")
                     })
                     suggestion = llm_response.content
                 except:
-                    suggestion = f"Check out {event.get('name', 'this event')} at {event.get('location', 'Bangalore')}!"
+                    suggestion = f"Check out {package.get('name', 'this package')} in {package.get('destination', 'amazing destination')}!"
             else:
-                suggestion = f"Check out {event.get('name', 'this event')} at {event.get('location', 'Bangalore')}!"
+                suggestion = f"Check out {package.get('name', 'this package')} in {package.get('destination', 'amazing destination')}!"
             
-            events_with_suggestions.append({
+            packages_with_suggestions.append({
                 "suggestion": suggestion,
-                "event_details": {
-                    "id": event.get("id"),
-                    "name": event.get("name"),
-                    "category": event.get("category"),
-                    "location": event.get("location"),
-                    "date": event.get("date"),
-                    "time": event.get("time"),
-                    "price": event.get("price"),
-                    "image_url": event.get("image_url"),
-                    "booking_link": event.get("booking_link")
+                "package_details": {
+                    "id": package.get("id"),
+                    "name": package.get("name"),
+                    "category": package.get("category"),
+                    "destination": package.get("destination"),
+                    "destination_country": package.get("destination_country"),
+                    "duration_days": package.get("duration_days"),
+                    "duration_nights": package.get("duration_nights"),
+                    "price_range": package.get("price_range"),
+                    "price_min": package.get("price_min"),
+                    "price_max": package.get("price_max"),
+                    "currency": package.get("currency"),
+                    "inclusions": package.get("inclusions", []),
+                    "exclusions": package.get("exclusions", []),
+                    "highlights": package.get("highlights", []),
+                    "image_urls": package.get("image_urls", []),
+                    "main_image_url": package.get("main_image_url"),
+                    "booking_link": package.get("booking_link"),
+                    "travel_agent_id": package.get("travel_agent_id"),
+                    "travel_agent_name": package.get("travel_agent_name")
                 }
             })
         
         # Track search (accumulate preferences)
-        track_user_search(phone_number, combined_interests, categories, len(events))
+        track_user_search(phone_number, combined_interests, "interests", categories, None, len(packages))
         
         return JSONResponse(content={
             "success": True,
@@ -1618,9 +867,9 @@ def discover_events_personalized(phone_number: str, request: DiscoverEventsReque
             "combined_interests_used": combined_interests,
             "mapped_categories": categories,
             "mapping_method": mapping_method,
-            "total_matching_events": len(events),
-            "returned_events": len(events_with_suggestions),
-            "events": events_with_suggestions,
+            "total_matching_packages": len(packages),
+            "returned_packages": len(packages_with_suggestions),
+            "packages": packages_with_suggestions,
             "source": "Supabase",
             "ai_generated": llm_available
         })
@@ -1633,40 +882,36 @@ def discover_events_personalized(phone_number: str, request: DiscoverEventsReque
             }
         )
 
-@app.post("/api/event/by-interests")
-def get_event_by_interests(
-    request: InterestsRequest, 
+@app.post("/api/package/by-interests")
+def get_package_by_interests(
+    request: PackageInterestsRequest, 
     background_tasks: BackgroundTasks, 
     req: Request
 ):
     """
-    Get events based on user interests with optional hotel-specific filtering.
+    Get travel packages based on client interests.
     
     Request body:
-    - interests: Comma-separated interests (e.g., "music, outdoor, adventure")
+    - interests: Comma-separated interests (e.g., "honeymoon, beach, romantic")
     - phone_number: Phone number for real-time results and tracking (+91XXXXXXXXXX or international)
-    - hotel_id: Optional hotel ID or slug for location-based filtering
+    - travel_agent_id: Optional travel agent ID to filter packages
     
     The system will:
-    1. Use AI to map interests to event categories
-    2. Query events matching those categories
-    3. If hotel_id provided:
-       - Prioritize hotel's own services (spa, restaurant, bar)
-       - Filter external events by hotel location and search radius
-       - Sort by distance from hotel
-    4. Return up to 5 matching events with conversational descriptions
+    1. Use AI to map interests to package categories
+    2. Query packages matching those categories
+    3. If travel_agent_id provided, filter packages by travel agent
+    4. Return up to 5 matching packages with conversational descriptions
     5. If phone_number provided:
        - Track search history and accumulate preferences
-       - Write results to kiosk_results table for real-time push to frontend
+       - Write results to search_results table for real-time push to frontend
        - Frontend subscribes to phone_number to receive results instantly
     
-    NOTE: For full personalization features, use /api/users/{phone_number}/discover-events
+    NOTE: For full personalization features, use /api/users/{phone_number}/discover-packages
     """
     start_time = datetime.now()
     try:
-        # Predefined categories (must match database exactly)
-        # Note: Database has both "entertainment" and "comedy" as separate categories
-        valid_categories = ["concert", "sports", "outdoor", "food", "spiritual", "cultural", "kids", "entertainment", "comedy"]
+        # Predefined package categories (must match database exactly)
+        valid_categories = ["adventure", "family", "honeymoon", "luxury", "beach", "cultural", "spiritual", "sports", "cruise", "safari", "wellness", "group", "solo", "corporate"]
         
         # Step 1: Use LLM to map interests to categories
         categories = []
@@ -1713,47 +958,175 @@ def get_event_by_interests(
                 status_code=400,
                 content={
                     "success": False,
-                    "message": f"Could not map interests '{request.interests}' to any event categories. Please try different interests.",
+                    "message": f"Could not map interests '{request.interests}' to any package categories. Please try different interests.",
                     "valid_categories": valid_categories,
-                    "hint": "Try: music, comedy, sports, outdoor, food, spiritual, cultural, kids"
+                    "hint": "Try: honeymoon, adventure, family, beach, luxury, cultural, wellness"
                 }
             )
         
-        # Step 2: Query Supabase for events matching any of the categories
-        # Build OR query for multiple categories
-        events = []
+        # Step 2: Query Supabase for packages matching any of the categories
+        packages = []
+        package_ids = set()  # Track to avoid duplicates
+        
         for category in categories:
-            response = supabase.table('events').select("*").eq('category', category).execute()
-            if response.data:
-                events.extend(response.data)
-        
-        # Step 2.5: Hotel-specific filtering (if hotel_id provided)
-        hotel = None
-        hotel_services = []
-        if request.hotel_id:
-            print(f"DEBUG - Filtering events for hotel: {request.hotel_id}")
-            hotel = get_hotel_by_id_or_slug(request.hotel_id)
+            print(f"DEBUG - Searching for category: '{category}'")
             
-            if hotel:
-                # Get hotel services first (priority)
-                hotel_services = get_hotel_services_as_events(request.hotel_id, categories)
-                print(f"DEBUG - Found {len(hotel_services)} hotel services matching categories")
+            # Query by category - try multiple approaches
+            response = None
+            
+            # Approach 1: Try with is_active=True
+            try:
+                query = supabase.table('packages').select("*").eq('category', category)
                 
-                # Filter external events by hotel location
-                events = filter_events_by_hotel_location(events, hotel)
-                print(f"DEBUG - After location filtering: {len(events)} external events")
+                # Filter by travel agent if provided
+                if request.travel_agent_id:
+                    query = query.eq('travel_agent_id', request.travel_agent_id)
                 
-                # Combine: Hotel services first, then nearby events
-                events = hotel_services + events
+                # Try with is_active=True first
+                query_active = query.eq('is_active', True)
+                response = query_active.order('is_featured', desc=True).order('display_order').execute()
+                print(f"DEBUG - Query with is_active=True for '{category}': {len(response.data) if response.data else 0} packages")
+                
+                # If no results, try without is_active filter
+                if not response.data or len(response.data) == 0:
+                    print(f"DEBUG - No packages with is_active=True for '{category}', trying without filter...")
+                    response = query.order('is_featured', desc=True).order('display_order').execute()
+                    print(f"DEBUG - Query without is_active filter for '{category}': {len(response.data) if response.data else 0} packages")
+                    
+            except Exception as e:
+                print(f"DEBUG - Query error for category '{category}': {e}")
+                import traceback
+                traceback.print_exc()
+                # Try simple query as fallback
+                try:
+                    response = supabase.table('packages').select("*").eq('category', category).execute()
+                except Exception as e2:
+                    print(f"DEBUG - Fallback query also failed: {e2}")
+                    response = None
+            
+            if response and response.data:
+                print(f"DEBUG - Processing {len(response.data)} packages for category '{category}'")
+                for pkg in response.data:
+                    pkg_id = pkg.get('id')
+                    pkg_name = pkg.get('name')
+                    pkg_category = pkg.get('category')
+                    pkg_is_active = pkg.get('is_active')
+                    
+                    print(f"DEBUG - Package details: id={pkg_id}, name={pkg_name}, category={pkg_category}, is_active={pkg_is_active}, type(is_active)={type(pkg_is_active)}")
+                    
+                    # Verify category matches (case-insensitive)
+                    if pkg_category and pkg_category.lower() != category.lower():
+                        print(f"DEBUG - Skipping {pkg_name}: category mismatch ('{pkg_category}' != '{category}')")
+                        continue
+                    
+                    # Check if already added (by ID) - skip duplicates
+                    if pkg_id in package_ids:
+                        print(f"DEBUG - ⚠️ Skipped {pkg_name}: duplicate ID ({pkg_id})")
+                        continue
+                    
+                    # Only include if is_active is not explicitly False
+                    # Handle both boolean True and string "true" from database, or None
+                    is_active_valid = True  # Default to include
+                    if pkg_is_active is False:
+                        is_active_valid = False
+                    elif isinstance(pkg_is_active, str) and pkg_is_active.lower() in ('false', '0', 'no'):
+                        is_active_valid = False
+                    
+                    if not is_active_valid:
+                        print(f"DEBUG - ❌ Skipped {pkg_name}: is_active={pkg_is_active} (explicitly False)")
+                        continue
+                    
+                    # Add the package - use ID or create temporary one
+                    if pkg_id:
+                        packages.append(pkg)
+                        package_ids.add(pkg_id)
+                        print(f"DEBUG - ✅ Added package: {pkg_name} (id: {pkg_id}, category: {pkg_category}, is_active: {pkg_is_active})")
+                    else:
+                        # Package without ID - still add it with a temporary identifier
+                        temp_id = f"temp_{len(packages)}_{pkg_name}"
+                        packages.append(pkg)
+                        package_ids.add(temp_id)
+                        print(f"DEBUG - ✅ Added package (no ID): {pkg_name} (category: {pkg_category}, is_active: {pkg_is_active})")
             else:
-                print(f"DEBUG - Hotel not found: {request.hotel_id}")
+                print(f"DEBUG - ⚠️ No response data for category '{category}'")
+                if response:
+                    print(f"DEBUG - Response object: {response}")
+                    print(f"DEBUG - Response.data: {response.data if hasattr(response, 'data') else 'No data attribute'}")
         
-        if not events or len(events) == 0:
+        # Summary after category search
+        print(f"DEBUG - 📊 Summary after category search: {len(packages)} packages collected from {len(categories)} categories")
+        if packages:
+            print(f"DEBUG - 📦 Collected packages: {[p.get('name', 'Unknown') for p in packages[:5]]}")
+        
+        # Step 2.5: Also search by package name/description if no results (fuzzy search)
+        if not packages:
+            print(f"DEBUG - No packages found by category, trying name/description search...")
+            search_terms = request.interests.lower().split()
+            
+            # Search each term in name, description, short_description
+            for term in search_terms:
+                # Search in name
+                name_query = supabase.table('packages').select("*").ilike('name', f'%{term}%')
+                if request.travel_agent_id:
+                    name_query = name_query.eq('travel_agent_id', request.travel_agent_id)
+                name_response = name_query.order('is_featured', desc=True).limit(5).execute()
+                
+                if name_response.data:
+                    for pkg in name_response.data:
+                        pkg_id = pkg.get('id')
+                        if pkg_id and pkg_id not in package_ids and pkg.get('is_active') is not False:
+                            packages.append(pkg)
+                            package_ids.add(pkg_id)
+                
+                # Search in description
+                desc_query = supabase.table('packages').select("*").ilike('description', f'%{term}%')
+                if request.travel_agent_id:
+                    desc_query = desc_query.eq('travel_agent_id', request.travel_agent_id)
+                desc_response = desc_query.order('is_featured', desc=True).limit(5).execute()
+                
+                if desc_response.data:
+                    for pkg in desc_response.data:
+                        pkg_id = pkg.get('id')
+                        if pkg_id and pkg_id not in package_ids and pkg.get('is_active') is not False:
+                            packages.append(pkg)
+                            package_ids.add(pkg_id)
+            
+            if packages:
+                print(f"DEBUG - Found {len(packages)} packages by name/description search")
+        
+        # Critical check: Print packages list before final check
+        print(f"DEBUG - 🔍 FINAL CHECK: packages list has {len(packages) if packages else 0} items")
+        if packages:
+            print(f"DEBUG - 🔍 Packages in list: {[p.get('name', 'Unknown') for p in packages[:5]]}")
+        else:
+            print(f"DEBUG - 🔍 Packages list is EMPTY!")
+            print(f"DEBUG - 🔍 package_ids set: {package_ids}")
+        
+        if not packages or len(packages) == 0:
+            # Debug: Check what packages exist in database
+            debug_query = supabase.table('packages').select("id, name, category, is_active").limit(10).execute()
+            total_packages = len(debug_query.data) if debug_query.data else 0
+            print(f"DEBUG - Total packages in DB: {total_packages}")
+            
+            # Check packages by category
+            category_packages = {}
+            if debug_query.data:
+                for pkg in debug_query.data:
+                    cat = pkg.get('category')
+                    if cat:
+                        if cat not in category_packages:
+                            category_packages[cat] = []
+                        category_packages[cat].append({
+                            "name": pkg.get('name'),
+                            "is_active": pkg.get('is_active')
+                        })
+                print(f"DEBUG - Packages by category: {category_packages}")
+            
             # Log to Supabase (async)
             response_time = (datetime.now() - start_time).total_seconds() * 1000
             background_tasks.add_task(log_to_supabase, {
                 "timestamp": datetime.now().isoformat(),
-                "endpoint": "/api/event/by-interests",
+                "endpoint": "/api/package/by-interests",
                 "interests": request.interests,
                 "mapped_categories": json.dumps(categories),
                 "mapping_method": mapping_method,
@@ -1762,70 +1135,87 @@ def get_event_by_interests(
                 "selected_event_name": None,
                 "selected_event_category": None,
                 "success": False,
-                "error_message": f"No events found matching interests: {request.interests}",
+                "error_message": f"No packages found matching interests: {request.interests}",
                 "response_time_ms": response_time,
                 "client_ip": req.client.host if req.client else "unknown",
                 "user_agent": req.headers.get("user-agent", "unknown")
             })
+            
+            error_message = f"No packages found matching interests: {request.interests}"
+            hint = "Check if packages exist in database with matching categories and is_active=true (or NULL)"
+            
+            if total_packages == 0:
+                hint = "No packages found in database. Run CHECK_AND_FIX_PACKAGES.sql to insert sample data."
+            elif category_packages:
+                hint = f"Found packages in categories: {list(category_packages.keys())}. Searched for: {categories}. Check is_active status."
+            
             return JSONResponse(
                 status_code=404,
                 content={
                     "success": False,
-                    "message": f"No events found matching interests: {request.interests}",
-                    "mapped_categories": categories
+                    "message": error_message,
+                    "mapped_categories": categories,
+                    "hint": hint,
+                    "debug_info": {
+                        "total_packages_in_db": total_packages,
+                        "searched_categories": categories,
+                        "available_categories": list(category_packages.keys()) if category_packages else []
+                    }
                 }
             )
         
-        # Step 3: Select up to 5 events (or all if less than 5)
-        selected_events = events[:5] if len(events) > 5 else events
+        # Step 3: Select up to 5 packages (or all if less than 5)
+        selected_packages = packages[:5] if len(packages) > 5 else packages
         
-        # Step 4: Generate conversational descriptions for each event
-        events_with_suggestions = []
+        # Step 4: Generate conversational descriptions for each package
+        packages_with_suggestions = []
         
-        for event in selected_events:
+        for package in selected_packages:
             # Generate conversational description if LLM is available
             if llm_available and model:
                 try:
-                    chain = event_prompt | model
+                    chain = package_prompt | model
                     
                     llm_response = chain.invoke({
-                        "name": event.get("name", "Unknown Event"),
-                        "category": event.get("category", "event"),
-                        "description": event.get("description", "An exciting event"),
-                        "location": event.get("location", "Bangalore"),
-                        "date": event.get("date", "Soon"),
-                        "time": event.get("time", "TBA"),
-                        "price": event.get("price", "Contact organizer")
+                        "name": package.get("name", "Unknown Package"),
+                        "category": package.get("category", "package"),
+                        "description": package.get("description") or package.get("short_description", "An amazing travel package"),
+                        "destination": package.get("destination", "Unknown"),
+                        "duration_days": package.get("duration_days", 0),
+                        "price_range": package.get("price_range", "Contact for pricing")
                     })
                     suggestion = llm_response.content
                 except Exception as llm_error:
                     print(f"LLM generation failed: {llm_error}")
-                    suggestion = f"Check out {event.get('name', 'this event')} at {event.get('location', 'Bangalore')}! {event.get('description', 'An exciting event.')} It's on {event.get('date', 'soon')} at {event.get('time', 'TBA')}."
+                    suggestion = f"Check out {package.get('name', 'this package')} in {package.get('destination', 'amazing destination')}! {package.get('description', 'An amazing travel experience.')} Duration: {package.get('duration_days', 0)} days."
             else:
-                suggestion = f"Check out {event.get('name', 'this event')} at {event.get('location', 'Bangalore')}! {event.get('description', 'An exciting event.')} It's on {event.get('date', 'soon')} at {event.get('time', 'TBA')}."
+                suggestion = f"Check out {package.get('name', 'this package')} in {package.get('destination', 'amazing destination')}! {package.get('description', 'An amazing travel experience.')} Duration: {package.get('duration_days', 0)} days."
             
-            event_details = {
-                "id": event.get("id"),
-                "name": event.get("name"),
-                "category": event.get("category"),
-                "location": event.get("location"),
-                "date": event.get("date"),
-                "time": event.get("time"),
-                "price": event.get("price"),
-                "image_url": event.get("image_url"),
-                "booking_link": event.get("booking_link")
+            package_details = {
+                "id": package.get("id"),
+                "name": package.get("name"),
+                "category": package.get("category"),
+                "destination": package.get("destination"),
+                "destination_country": package.get("destination_country"),
+                "duration_days": package.get("duration_days"),
+                "duration_nights": package.get("duration_nights"),
+                "price_range": package.get("price_range"),
+                "price_min": package.get("price_min"),
+                "price_max": package.get("price_max"),
+                "currency": package.get("currency"),
+                "inclusions": package.get("inclusions", []),
+                "exclusions": package.get("exclusions", []),
+                "highlights": package.get("highlights", []),
+                "image_urls": package.get("image_urls", []),
+                "main_image_url": package.get("main_image_url"),
+                "booking_link": package.get("booking_link"),
+                "travel_agent_id": package.get("travel_agent_id"),
+                "travel_agent_name": package.get("travel_agent_name")
             }
             
-            # Add hotel-specific fields if hotel_id was provided
-            if request.hotel_id:
-                event_details["is_hotel_service"] = event.get("is_hotel_service", False)
-                event_details["distance_km"] = event.get("distance_km")
-                if event.get("is_hotel_service"):
-                    event_details["service_type"] = event.get("service_type")
-            
-            events_with_suggestions.append({
+            packages_with_suggestions.append({
                 "suggestion": suggestion,
-                "event_details": event_details
+                "package_details": package_details
             })
         
         # Track user search if phone_number provided (optional)
@@ -1834,22 +1224,21 @@ def get_event_by_interests(
                 # Get or create user and track search
                 user = get_or_create_user(request.phone_number)
                 if user:
-                    background_tasks.add_task(track_user_search, request.phone_number, request.interests, categories, len(events))
+                    background_tasks.add_task(track_user_search, request.phone_number, request.interests, "interests", categories, None, len(packages))
         
         # Log to Supabase (async) - SUCCESS CASE
-        # Log the first event for analytics purposes
-        first_event = selected_events[0]
+        first_package = selected_packages[0]
         response_time = (datetime.now() - start_time).total_seconds() * 1000
         background_tasks.add_task(log_to_supabase, {
             "timestamp": datetime.now().isoformat(),
-            "endpoint": "/api/event/by-interests",
+            "endpoint": "/api/package/by-interests",
             "interests": request.interests,
             "mapped_categories": json.dumps(categories),
-            "mapping_method": mapping_method,  # Track which method was used
-            "total_matching_events": len(events),
-            "selected_event_id": first_event.get("id"),
-            "selected_event_name": first_event.get("name"),
-            "selected_event_category": first_event.get("category"),
+            "mapping_method": mapping_method,
+            "total_matching_events": len(packages),
+            "selected_event_id": first_package.get("id"),
+            "selected_event_name": first_package.get("name"),
+            "selected_event_category": first_package.get("category"),
             "success": True,
             "error_message": None,
             "response_time_ms": response_time,
@@ -1862,40 +1251,26 @@ def get_event_by_interests(
             "success": True,
             "interests": request.interests,
             "mapped_categories": categories,
-            "mapping_method": mapping_method,  # "llm" or "keyword_fallback"
-            "total_matching_events": len(events),
-            "returned_events": len(events_with_suggestions),
-            "events": events_with_suggestions,
+            "mapping_method": mapping_method,
+            "total_matching_packages": len(packages),
+            "returned_packages": len(packages_with_suggestions),
+            "packages": packages_with_suggestions,
             "source": "Supabase",
             "ai_generated": llm_available,
-            "personalized": bool(request.phone_number)  # Indicate if tracking was enabled
+            "personalized": bool(request.phone_number)
         }
         
-        # Add hotel-specific information if hotel filtering was used
-        if request.hotel_id and hotel:
-            response_data["hotel_filtered"] = True
-            response_data["hotel"] = {
-                "id": hotel.get("id"),
-                "name": hotel.get("name"),
-                "slug": hotel.get("slug"),
-                "location": hotel.get("location_city"),
-                "search_radius_km": hotel.get("search_radius_km", 10)
-            }
-            response_data["hotel_services_count"] = len(hotel_services)
-        else:
-            response_data["hotel_filtered"] = False
-        
-        # Write results to kiosk_results table for real-time push (if phone_number provided)
+        # Write results to search_results table for real-time push (if phone_number provided)
         if request.phone_number:
             try:
                 # Generate timestamp in milliseconds for uniqueness
                 timestamp_millis = int(time.time() * 1000)
                 
-                supabase.table('kiosk_results').insert({
+                supabase.table('search_results').insert({
                     "phone_number": request.phone_number,
                     "timestamp_millis": timestamp_millis,
                     "results": response_data,
-                    "hotel_id": request.hotel_id,
+                    "travel_agent_id": request.travel_agent_id,
                     "created_at": datetime.now().isoformat()
                 }).execute()
                 print(f"✅ Results written for phone: {request.phone_number} at {timestamp_millis}")
@@ -1910,7 +1285,7 @@ def get_event_by_interests(
         response_time = (datetime.now() - start_time).total_seconds() * 1000
         background_tasks.add_task(log_to_supabase, {
             "timestamp": datetime.now().isoformat(),
-            "endpoint": "/api/event/by-interests",
+            "endpoint": "/api/package/by-interests",
             "interests": request.interests if hasattr(request, 'interests') else "unknown",
             "mapped_categories": None,
             "mapping_method": "error",
@@ -1929,7 +1304,222 @@ def get_event_by_interests(
             content={
                 "success": False,
                 "error": str(e),
-                "message": "Failed to fetch events from Supabase"
+                "message": "Failed to fetch packages from Supabase"
+            }
+        )
+
+@app.post("/api/package/by-destination")
+def get_package_by_destination(
+    request: PackageDestinationRequest,
+    background_tasks: BackgroundTasks,
+    req: Request
+):
+    """
+    Get travel packages for a specific destination.
+    
+    Request body:
+    - destination: Destination name (e.g., "Maldives", "Bali", "Switzerland")
+    - phone_number: Phone number for real-time results and tracking (+91XXXXXXXXXX or international)
+    - travel_agent_id: Optional travel agent ID to filter packages
+    
+    The system will:
+    1. Query packages matching the destination name (case-insensitive)
+    2. Filter by travel agent if provided
+    3. Return up to 10 matching packages with conversational descriptions
+    4. If phone_number provided:
+       - Track search history and accumulate destination preferences
+       - Write results to search_results table for real-time push to frontend
+       - Frontend subscribes to phone_number to receive results instantly
+    """
+    start_time = datetime.now()
+    try:
+        destination = request.destination.strip()
+        
+        if not destination:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "error": "Destination is required"
+                }
+            )
+        
+        # Query packages by destination (case-insensitive)
+        query = supabase.table('packages').select("*").ilike('destination', f"%{destination}%").eq('is_active', True)
+        
+        # Also search in destination_country
+        query_or = supabase.table('packages').select("*").ilike('destination_country', f"%{destination}%").eq('is_active', True)
+        
+        # Filter by travel agent if provided
+        if request.travel_agent_id:
+            query = query.eq('travel_agent_id', request.travel_agent_id)
+            query_or = query_or.eq('travel_agent_id', request.travel_agent_id)
+        
+        response = query.order('is_featured', desc=True).order('display_order').execute()
+        response_or = query_or.order('is_featured', desc=True).order('display_order').execute()
+        
+        packages = []
+        package_ids = set()
+        
+        # Combine results and remove duplicates
+        for package in (response.data or []):
+            if package.get('id') not in package_ids:
+                packages.append(package)
+                package_ids.add(package.get('id'))
+        
+        for package in (response_or.data or []):
+            if package.get('id') not in package_ids:
+                packages.append(package)
+                package_ids.add(package.get('id'))
+        
+        if not packages:
+            # Track search if phone number provided
+            if request.phone_number and validate_phone_number(request.phone_number):
+                background_tasks.add_task(track_user_search, request.phone_number, destination, "destination", None, destination, 0)
+            
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "success": False,
+                    "message": f"No packages found for destination: {destination}"
+                }
+            )
+        
+        # Select up to 10 packages (destination searches can have more results)
+        selected_packages = packages[:10] if len(packages) > 10 else packages
+        
+        # Generate conversational descriptions
+        packages_with_suggestions = []
+        
+        for package in selected_packages:
+            if llm_available and model:
+                try:
+                    chain = package_prompt | model
+                    llm_response = chain.invoke({
+                        "name": package.get("name", "Unknown Package"),
+                        "category": package.get("category", "package"),
+                        "description": package.get("description") or package.get("short_description", "An amazing travel package"),
+                        "destination": package.get("destination", "Unknown"),
+                        "duration_days": package.get("duration_days", 0),
+                        "price_range": package.get("price_range", "Contact for pricing")
+                    })
+                    suggestion = llm_response.content
+                except Exception as llm_error:
+                    print(f"LLM generation failed: {llm_error}")
+                    suggestion = f"Check out {package.get('name', 'this package')} in {package.get('destination', 'amazing destination')}! {package.get('description', 'An amazing travel experience.')} Duration: {package.get('duration_days', 0)} days."
+            else:
+                suggestion = f"Check out {package.get('name', 'this package')} in {package.get('destination', 'amazing destination')}! {package.get('description', 'An amazing travel experience.')} Duration: {package.get('duration_days', 0)} days."
+            
+            package_details = {
+                "id": package.get("id"),
+                "name": package.get("name"),
+                "category": package.get("category"),
+                "destination": package.get("destination"),
+                "destination_country": package.get("destination_country"),
+                "destination_city": package.get("destination_city"),
+                "duration_days": package.get("duration_days"),
+                "duration_nights": package.get("duration_nights"),
+                "price_range": package.get("price_range"),
+                "price_min": package.get("price_min"),
+                "price_max": package.get("price_max"),
+                "currency": package.get("currency"),
+                "inclusions": package.get("inclusions", []),
+                "exclusions": package.get("exclusions", []),
+                "highlights": package.get("highlights", []),
+                "image_urls": package.get("image_urls", []),
+                "main_image_url": package.get("main_image_url"),
+                "booking_link": package.get("booking_link"),
+                "travel_agent_id": package.get("travel_agent_id"),
+                "travel_agent_name": package.get("travel_agent_name")
+            }
+            
+            packages_with_suggestions.append({
+                "suggestion": suggestion,
+                "package_details": package_details
+            })
+        
+        # Track user search if phone_number provided
+        if request.phone_number:
+            if validate_phone_number(request.phone_number):
+                user = get_or_create_user(request.phone_number)
+                if user:
+                    background_tasks.add_task(track_user_search, request.phone_number, destination, "destination", None, destination, len(packages))
+        
+        # Log to Supabase (async) - SUCCESS CASE
+        response_time = (datetime.now() - start_time).total_seconds() * 1000
+        first_package = selected_packages[0] if selected_packages else None
+        background_tasks.add_task(log_to_supabase, {
+            "timestamp": datetime.now().isoformat(),
+            "endpoint": "/api/package/by-destination",
+            "interests": destination,
+            "mapped_categories": json.dumps([]),
+            "mapping_method": "destination_search",
+            "total_matching_events": len(packages),
+            "selected_event_id": first_package.get("id") if first_package else None,
+            "selected_event_name": first_package.get("name") if first_package else None,
+            "selected_event_category": first_package.get("category") if first_package else None,
+            "success": True,
+            "error_message": None,
+            "response_time_ms": response_time,
+            "client_ip": req.client.host if req.client else "unknown",
+            "user_agent": req.headers.get("user-agent", "unknown")
+        })
+        
+        # Return response
+        response_data = {
+            "success": True,
+            "destination": destination,
+            "total_matching_packages": len(packages),
+            "returned_packages": len(packages_with_suggestions),
+            "packages": packages_with_suggestions,
+            "source": "Supabase",
+            "ai_generated": llm_available,
+            "personalized": bool(request.phone_number)
+        }
+        
+        # Write results to search_results table for real-time push (if phone_number provided)
+        if request.phone_number:
+            try:
+                timestamp_millis = int(time.time() * 1000)
+                
+                supabase.table('search_results').insert({
+                    "phone_number": request.phone_number,
+                    "timestamp_millis": timestamp_millis,
+                    "results": response_data,
+                    "travel_agent_id": request.travel_agent_id,
+                    "created_at": datetime.now().isoformat()
+                }).execute()
+                print(f"✅ Results written for phone: {request.phone_number} at {timestamp_millis}")
+            except Exception as e:
+                print(f"⚠️ Failed to write kiosk results: {e}")
+        
+        return JSONResponse(content=response_data)
+            
+    except Exception as e:
+        # Log to Supabase (async) - ERROR CASE
+        response_time = (datetime.now() - start_time).total_seconds() * 1000
+        background_tasks.add_task(log_to_supabase, {
+            "timestamp": datetime.now().isoformat(),
+            "endpoint": "/api/package/by-destination",
+            "interests": request.destination if hasattr(request, 'destination') else "unknown",
+            "mapped_categories": None,
+            "mapping_method": "error",
+            "total_matching_events": 0,
+            "selected_event_id": None,
+            "selected_event_name": None,
+            "selected_event_category": None,
+            "success": False,
+            "error_message": str(e),
+            "response_time_ms": response_time,
+            "client_ip": req.client.host if req.client else "unknown",
+            "user_agent": req.headers.get("user-agent", "unknown")
+        })
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": str(e),
+                "message": "Failed to fetch packages from Supabase"
             }
         )
 
