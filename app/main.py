@@ -16,6 +16,7 @@ from supabase import create_client, Client
 from pydantic import BaseModel
 import random
 import json
+import html
 from datetime import datetime
 from typing import List, Dict, Any
 import asyncio
@@ -392,7 +393,8 @@ async def log_requests(request: Request, call_next):
         "path": request.url.path,
         "query_params": dict(request.query_params),
         "client_ip": request.client.host if request.client else "unknown",
-        "user_agent": request.headers.get("user-agent", "unknown")
+        "user_agent": request.headers.get("user-agent", "unknown"),
+        "request_headers": dict(request.headers)
     }
     
     # Capture request body for POST requests
@@ -400,7 +402,10 @@ async def log_requests(request: Request, call_next):
         try:
             body = await request.body()
             if body:
-                log_entry["request_body"] = json.loads(body.decode())
+                try:
+                    log_entry["request_body"] = json.loads(body.decode())
+                except:
+                    log_entry["request_body"] = body.decode() if body else None
             else:
                 log_entry["request_body"] = None
             # Recreate request with body for downstream processing
@@ -417,11 +422,60 @@ async def log_requests(request: Request, call_next):
         log_entry["status_code"] = response.status_code
         log_entry["success"] = 200 <= response.status_code < 400
         log_entry["error"] = None
+        
+        # Capture response headers
+        log_entry["response_headers"] = dict(response.headers)
+        
+        # Capture response body by reading it
+        try:
+            if hasattr(response, 'body_iterator'):
+                # For streaming responses, we can't easily capture body
+                log_entry["response_body"] = None
+            elif isinstance(response, JSONResponse):
+                # For JSONResponse, we can get the content
+                if hasattr(response, 'body'):
+                    body_bytes = response.body
+                    if body_bytes:
+                        try:
+                            log_entry["response_body"] = json.loads(body_bytes.decode())
+                        except:
+                            log_entry["response_body"] = body_bytes.decode()[:2000]  # Limit to 2000 chars
+                elif hasattr(response, 'content'):
+                    # Try to get content directly
+                    try:
+                        if isinstance(response.content, (dict, list)):
+                            log_entry["response_body"] = response.content
+                        elif isinstance(response.content, str):
+                            try:
+                                log_entry["response_body"] = json.loads(response.content)
+                            except:
+                                log_entry["response_body"] = response.content[:2000]
+                        else:
+                            log_entry["response_body"] = None
+                    except:
+                        log_entry["response_body"] = None
+                else:
+                    log_entry["response_body"] = None
+            elif isinstance(response, HTMLResponse):
+                # For HTML responses, capture a snippet
+                if hasattr(response, 'content') and response.content:
+                    content_str = response.content if isinstance(response.content, str) else response.content.decode()[:500]
+                    log_entry["response_body"] = f"<HTML Response (truncated): {len(content_str)} chars>"
+                else:
+                    log_entry["response_body"] = None
+            else:
+                log_entry["response_body"] = None
+        except Exception as e:
+            log_entry["response_body"] = None
+            log_entry["response_body_error"] = str(e)
+            
     except Exception as e:
         log_entry["status_code"] = 500
         log_entry["success"] = False
         log_entry["error"] = str(e)
         log_entry["error_type"] = type(e).__name__
+        log_entry["response_headers"] = {}
+        log_entry["response_body"] = None
         # Create error response
         response = JSONResponse(
             status_code=500,
@@ -1524,38 +1578,125 @@ def get_package_by_destination(
         )
 
 @app.get("/api/logs", response_class=HTMLResponse)
-def view_audit_logs():
+def view_audit_logs(
+    time_filter: str = "all",  # all, hour, day, week
+    endpoint: str = "all",  # all or specific endpoint
+    status: str = "all"  # all, success, failed
+):
     """
-    View all audit logs in a nice HTML format for debugging
+    View all audit logs in a nice HTML format for debugging with filters
     """
     # Return simple HTML without complex CSS that causes f-string issues
-    return HTMLResponse(content=generate_logs_html())
+    return HTMLResponse(content=generate_logs_html(time_filter, endpoint, status))
 
-def generate_logs_html():
+def generate_logs_html(time_filter: str = "all", endpoint: str = "all", status: str = "all"):
     """Generate HTML for logs page (separate function to avoid f-string CSS issues)"""
-    # Calculate statistics first
-    total_logs = len(audit_logs)
-    successful_logs = sum(1 for log in audit_logs if log.get("success", False))
+    from datetime import timedelta
+    
+    # Filter logs based on criteria
+    filtered_logs = audit_logs.copy()
+    
+    # Time filtering
+    now = datetime.now()
+    if time_filter == "hour":
+        cutoff = now - timedelta(hours=1)
+        filtered_logs = [log for log in filtered_logs if log.get("timestamp") and datetime.fromisoformat(log["timestamp"]) > cutoff]
+    elif time_filter == "day":
+        cutoff = now - timedelta(days=1)
+        filtered_logs = [log for log in filtered_logs if log.get("timestamp") and datetime.fromisoformat(log["timestamp"]) > cutoff]
+    elif time_filter == "week":
+        cutoff = now - timedelta(weeks=1)
+        filtered_logs = [log for log in filtered_logs if log.get("timestamp") and datetime.fromisoformat(log["timestamp"]) > cutoff]
+    
+    # Endpoint filtering
+    if endpoint != "all":
+        filtered_logs = [log for log in filtered_logs if log.get("path") == endpoint]
+    
+    # Status filtering
+    if status == "success":
+        filtered_logs = [log for log in filtered_logs if log.get("success", False)]
+    elif status == "failed":
+        filtered_logs = [log for log in filtered_logs if not log.get("success", True)]
+    
+    # Calculate statistics from filtered logs
+    total_logs = len(filtered_logs)
+    successful_logs = sum(1 for log in filtered_logs if log.get("success", False))
     failed_logs = total_logs - successful_logs
     success_rate = round((successful_logs / total_logs * 100) if total_logs > 0 else 0, 1)
-    avg_duration = round(sum(log.get("duration_ms", 0) for log in audit_logs) / total_logs if total_logs > 0 else 0, 2)
+    avg_duration = round(sum(log.get("duration_ms", 0) for log in filtered_logs) / total_logs if total_logs > 0 else 0, 2)
+    
+    # Get unique endpoints for filter dropdown
+    unique_endpoints = sorted(set(log.get("path", "") for log in audit_logs if log.get("path")))
     
     # Generate log entries HTML
     log_entries_html = ""
     if total_logs > 0:
-        for log in reversed(audit_logs):  # Show newest first
+        for log in reversed(filtered_logs):  # Show newest first
             success_class = "success" if log.get("success", False) else "error"
             status_class = "success" if log.get("success", False) else "error"
+            
+            # Format request headers
+            request_headers_html = ""
+            if "request_headers" in log and log["request_headers"]:
+                headers_str = json.dumps(dict(log["request_headers"]), indent=2)
+                headers_str_escaped = html.escape(headers_str)
+                request_headers_html = f"""
+                <div class="collapsible-section">
+                    <button class="collapsible-btn" onclick="toggleSection(this)">📋 Request Headers</button>
+                    <div class="collapsible-content">
+                        <div class="json-box">
+                            <pre>{headers_str_escaped}</pre>
+                        </div>
+                    </div>
+                </div>
+                """
             
             # Format request body
             request_body_html = ""
             if "request_body" in log and log["request_body"]:
+                body_str = json.dumps(log["request_body"], indent=2) if isinstance(log["request_body"], (dict, list)) else str(log["request_body"])
+                body_str_escaped = html.escape(body_str)
                 request_body_html = f"""
-                <div class="log-row">
-                    <div class="log-label">Request Body:</div>
-                    <div class="log-value">
+                <div class="collapsible-section">
+                    <button class="collapsible-btn" onclick="toggleSection(this)">📤 Request Body</button>
+                    <div class="collapsible-content">
                         <div class="json-box">
-                            <pre>{json.dumps(log["request_body"], indent=2)}</pre>
+                            <pre>{body_str_escaped}</pre>
+                        </div>
+                    </div>
+                </div>
+                """
+            
+            # Format response headers
+            response_headers_html = ""
+            if "response_headers" in log and log["response_headers"]:
+                resp_headers_str = json.dumps(dict(log["response_headers"]), indent=2)
+                resp_headers_str_escaped = html.escape(resp_headers_str)
+                response_headers_html = f"""
+                <div class="collapsible-section">
+                    <button class="collapsible-btn" onclick="toggleSection(this)">📥 Response Headers</button>
+                    <div class="collapsible-content">
+                        <div class="json-box">
+                            <pre>{resp_headers_str_escaped}</pre>
+                        </div>
+                    </div>
+                </div>
+                """
+            
+            # Format response body
+            response_body_html = ""
+            if "response_body" in log and log["response_body"] is not None:
+                if isinstance(log["response_body"], (dict, list)):
+                    resp_body_str = json.dumps(log["response_body"], indent=2)
+                else:
+                    resp_body_str = str(log["response_body"])
+                resp_body_str_escaped = html.escape(resp_body_str)
+                response_body_html = f"""
+                <div class="collapsible-section">
+                    <button class="collapsible-btn" onclick="toggleSection(this)">📥 Response Body</button>
+                    <div class="collapsible-content">
+                        <div class="json-box">
+                            <pre>{resp_body_str_escaped}</pre>
                         </div>
                     </div>
                 </div>
@@ -1599,7 +1740,10 @@ def generate_logs_html():
                         <div class="log-label">Duration:</div>
                         <div class="log-value">{log.get('duration_ms', 0)} ms</div>
                     </div>
+                    {request_headers_html}
                     {request_body_html}
+                    {response_headers_html}
+                    {response_body_html}
                     {error_html}
                 </div>
             </div>
@@ -1742,6 +1886,73 @@ def generate_logs_html():
                 font-weight: bold;
                 margin-left: 10px;
             }
+            .filters {
+                background: rgba(255, 255, 255, 0.2);
+                padding: 15px;
+                border-radius: 8px;
+                margin-top: 15px;
+                display: flex;
+                gap: 15px;
+                flex-wrap: wrap;
+                align-items: center;
+            }
+            .filter-group {
+                display: flex;
+                flex-direction: column;
+                gap: 5px;
+            }
+            .filter-group label {
+                font-size: 0.9em;
+                font-weight: bold;
+            }
+            .filter-group select {
+                padding: 8px 12px;
+                border-radius: 5px;
+                border: none;
+                font-size: 0.9em;
+                min-width: 150px;
+            }
+            .filter-btn {
+                background: white;
+                color: #667eea;
+                border: 2px solid white;
+                padding: 8px 20px;
+                border-radius: 5px;
+                cursor: pointer;
+                font-weight: bold;
+                margin-top: 20px;
+            }
+            .filter-btn:hover {
+                background: rgba(255, 255, 255, 0.9);
+            }
+            .collapsible-section {
+                margin-top: 10px;
+            }
+            .collapsible-btn {
+                background: #667eea;
+                color: white;
+                border: none;
+                padding: 8px 15px;
+                border-radius: 5px;
+                cursor: pointer;
+                font-weight: bold;
+                width: 100%;
+                text-align: left;
+                margin-top: 5px;
+            }
+            .collapsible-btn:hover {
+                background: #5568d3;
+            }
+            .collapsible-btn.active {
+                background: #764ba2;
+            }
+            .collapsible-content {
+                display: none;
+                margin-top: 5px;
+            }
+            .collapsible-content.active {
+                display: block;
+            }
         </style>
     </head>
     <body>
@@ -1752,6 +1963,33 @@ def generate_logs_html():
                 <a href="/api/logs" class="refresh-btn">🔄 Refresh</a>
                 <a href="/api/logs/clear" class="clear-btn">🗑️ Clear Logs</a>
             </div>
+            <form method="get" action="/api/logs" class="filters">
+                <div class="filter-group">
+                    <label>⏰ Time Filter</label>
+                    <select name="time_filter" id="time_filter">
+                        <option value="all" """ + ('selected' if time_filter == 'all' else '') + """>All Time</option>
+                        <option value="hour" """ + ('selected' if time_filter == 'hour' else '') + """>Last Hour</option>
+                        <option value="day" """ + ('selected' if time_filter == 'day' else '') + """>Last 24 Hours</option>
+                        <option value="week" """ + ('selected' if time_filter == 'week' else '') + """>Last Week</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label>🔗 Endpoint</label>
+                    <select name="endpoint" id="endpoint">
+                        <option value="all" """ + ('selected' if endpoint == 'all' else '') + """>All Endpoints</option>""" + \
+                        ''.join([f'<option value="{ep}" ' + ('selected' if endpoint == ep else '') + f'>{ep}</option>' for ep in unique_endpoints]) + """
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label>✅ Status</label>
+                    <select name="status" id="status">
+                        <option value="all" """ + ('selected' if status == 'all' else '') + """>All</option>
+                        <option value="success" """ + ('selected' if status == 'success' else '') + """>Success Only</option>
+                        <option value="failed" """ + ('selected' if status == 'failed' else '') + """>Failed Only</option>
+                    </select>
+                </div>
+                <button type="submit" class="filter-btn">🔍 Apply Filters</button>
+            </form>
         </div>
         
         <div class="stats">
@@ -1779,6 +2017,24 @@ def generate_logs_html():
         
         <script>
             // Auto-refresh removed as per user request
+            function toggleSection(btn) {
+                const content = btn.nextElementSibling;
+                const isActive = content.classList.contains('active');
+                
+                // Close all sections in the same log entry
+                const logEntry = btn.closest('.log-entry');
+                const allSections = logEntry.querySelectorAll('.collapsible-content');
+                const allButtons = logEntry.querySelectorAll('.collapsible-btn');
+                
+                allSections.forEach(section => section.classList.remove('active'));
+                allButtons.forEach(button => button.classList.remove('active'));
+                
+                // Toggle the clicked section
+                if (!isActive) {
+                    content.classList.add('active');
+                    btn.classList.add('active');
+                }
+            }
         </script>
     </body>
     </html>
