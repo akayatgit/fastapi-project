@@ -161,13 +161,17 @@ class PackageInterestsRequest(BaseModel):
     interests: str  # Comma-separated interests
     phone_number: str = None  # Optional: for personalized recommendations
     travel_agent_id: str = None  # Optional: filter packages by travel agent
+    user_name: str  # Required: user name to store in user profile and search history
+    user_source: str  # Required: source information (e.g., city) to store in user profile and search history
     
     class Config:
         json_schema_extra = {
             "example": {
                 "interests": "honeymoon, beach, romantic",
                 "phone_number": "+919876543210",
-                "travel_agent_id": "spotive-travel"
+                "travel_agent_id": "spotive-travel",
+                "user_name": "John Doe",
+                "user_source": "Mumbai"
             }
         }
 
@@ -267,7 +271,7 @@ def get_or_create_user(phone_number: str, username: str = None) -> Dict[str, Any
         print(f"Error in get_or_create_user: {e}")
         return None
 
-def track_user_search(phone_number: str, search_query: str, search_type: str, mapped_categories: list = None, destination: str = None, results_count: int = 0):
+def track_user_search(phone_number: str, search_query: str, search_type: str, mapped_categories: list = None, destination: str = None, results_count: int = 0, user_name: str = None, user_source: str = None):
     """Track user search and accumulate preferences (supports both interests and destination searches)"""
     try:
         # Get user
@@ -288,6 +292,13 @@ def track_user_search(phone_number: str, search_query: str, search_type: str, ma
             "search_timestamp": datetime.now().isoformat(),
             "results_count": results_count
         }
+        
+        # Add user_name and user_source (required fields)
+        if user_name:
+            search_entry["user_name"] = user_name
+        if user_source:
+            search_entry["user_source"] = user_source
+        
         supabase.table('user_search_history').insert(search_entry).execute()
         
         # Update user's favorite_categories (accumulate preferences)
@@ -317,6 +328,12 @@ def track_user_search(phone_number: str, search_query: str, search_type: str, ma
             update_data["favorite_categories"] = favorite_categories
         if destination:
             update_data["favorite_destinations"] = favorite_destinations
+        
+        # Update user_name and user_source (required fields)
+        if user_name:
+            update_data["username"] = user_name
+        if user_source:
+            update_data["user_source"] = user_source
         
         supabase.table('users').update(update_data).eq('phone_number', phone_number).execute()
         
@@ -945,10 +962,14 @@ def get_package_by_interests(
     """
     Get travel packages based on client interests.
     
+    NOTE: This endpoint is called "GetPackagesAPI" in ElevenLabs webhook configuration.
+    
     Request body:
     - interests: Comma-separated interests (e.g., "honeymoon, beach, romantic")
     - phone_number: Phone number for real-time results and tracking (+91XXXXXXXXXX or international)
     - travel_agent_id: Optional travel agent ID to filter packages
+    - user_name: Required - user name to store in user profile and search history
+    - user_source: Required - source information (e.g., city) to store in user profile and search history
     
     The system will:
     1. Use AI to map interests to package categories
@@ -957,6 +978,7 @@ def get_package_by_interests(
     4. Return up to 5 matching packages with conversational descriptions
     5. If phone_number provided:
        - Track search history and accumulate preferences
+       - Store user_name and user_source in user profile and search history
        - Write results to search_results table for real-time push to frontend
        - Frontend subscribes to phone_number to receive results instantly
     
@@ -1275,10 +1297,10 @@ def get_package_by_interests(
         # Track user search if phone_number provided (optional)
         if request.phone_number:
             if validate_phone_number(request.phone_number):
-                # Get or create user and track search
-                user = get_or_create_user(request.phone_number)
+                # Get or create user with name (required)
+                user = get_or_create_user(request.phone_number, username=request.user_name)
                 if user:
-                    background_tasks.add_task(track_user_search, request.phone_number, request.interests, "interests", categories, None, len(packages))
+                    background_tasks.add_task(track_user_search, request.phone_number, request.interests, "interests", categories, None, len(packages), request.user_name, request.user_source)
         
         # Log to Supabase (async) - SUCCESS CASE
         first_package = selected_packages[0]
