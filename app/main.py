@@ -1359,7 +1359,8 @@ def get_package_by_interests(
                     "timestamp_millis": timestamp_millis,
                     "results": response_data,
                     "travel_agent_id": request.travel_agent_id,
-                    "created_at": datetime.now().isoformat()
+                    "created_at": datetime.now().isoformat(),
+                    "is_domestic": request.is_domestic if request.is_domestic is not None else False
                 }).execute()
                 print(f"✅ Results written for phone: {request.phone_number} at {timestamp_millis}")
             except Exception as e:
@@ -1575,7 +1576,8 @@ def get_package_by_destination(
                     "timestamp_millis": timestamp_millis,
                     "results": response_data,
                     "travel_agent_id": request.travel_agent_id,
-                    "created_at": datetime.now().isoformat()
+                    "created_at": datetime.now().isoformat(),
+                    "is_domestic": False  # Default to False for destination searches (can be updated if needed)
                 }).execute()
                 print(f"✅ Results written for phone: {request.phone_number} at {timestamp_millis}")
             except Exception as e:
